@@ -1,7 +1,7 @@
 # RNAPro: An accurate RNA structure prediction model by Kaggle synthesis
 
 ### Model Description
-RNAPro is a state-of-the-art RNA 3D folding model developed in collaboration with the hosts and winners of the [Stanford RNA 3D Folding Kaggle competition.](https://www.kaggle.com/competitions/stanford-rna-3d-folding) RNAPro combines RNA-specific modules — including template modeling, multiple sequence alignment (MSA), and a pretrained RNA foundation model, especially, RibonanzaNet2 — with Protenix to enhance RNA structure prediction performance. Read more about the kaggle competition and model in the [preprint](https://www.biorxiv.org/content/10.64898/2025.12.30.696949v1).
+RNAPro is a state-of-the-art RNA 3D folding model developed in collaboration with the hosts and winners of the [Stanford RNA 3D Folding Kaggle competition.](https://www.kaggle.com/competitions/stanford-rna-3d-folding) RNAPro combines RNA-specific modules including template modeling, multiple sequence alignment (MSA), and a pretrained RNA foundation model, especially, RibonanzaNet2 with Protenix to enhance RNA structure prediction performance. Read more about the kaggle competition and model in the [preprint](https://www.biorxiv.org/content/10.64898/2025.12.30.696949v1).
 
 
 ## Installation
