@@ -246,14 +246,19 @@ def parse_configs(
         required=False,
         help="Maximum length of the sequence. Longer sequences will be skipped during inference"
     )
-
-    # This is new
     parser.add_argument(
         "--logger",
         type=str,
         default="logging",
         required=False,
         help="Logger to use during inference. Supports 'logging' and 'print'"
+    )
+    parser.add_argument(
+        "--num_templates",
+        type=int,
+        default=5,
+        required=False,
+        help="Number of templates to use during inference"
     )
 
     # Register arguments
@@ -272,11 +277,10 @@ def parse_configs(
         vars(parser.parse_args(arg_str.split())) if arg_str else {}
     )
 
-    max_len = parser.parse_args(arg_str.split()).max_len
-    merged_configs.max_len = max_len
-
-    logger = parser.parse_args(arg_str.split()).logger
-    merged_configs.logger = logger
+    args = parser.parse_args(arg_str.split())
+    merged_configs.max_len = args.max_len
+    merged_configs.logger = args.logger
+    merged_configs.num_templates = args.num_templates
 
     return merged_configs
 

@@ -114,7 +114,7 @@ class InferenceRunner(object):
         if not os.path.exists(checkpoint_path):
             raise Exception(f"Given checkpoint path not exist [{checkpoint_path}]")
         self.print(
-            f"Loading from {checkpoint_path}, strict: {self.configs.load_strict}"
+            f"Loading weights from {checkpoint_path}  (strict={self.configs.load_strict})"
         )
         checkpoint = torch.load(checkpoint_path, self.device)
 
@@ -331,7 +331,7 @@ def run() -> None:
 
     solution = make_dummy_solution(valid_df)
     for idx, row in valid_df.iterrows():
-        print(f"\n -> Sequence {row.target_id}: {row.sequence}")
+        print(f"\n -> Sequence {idx + 1}/{len(valid_df)} : {row.target_id} - {row.sequence}")
 
         if len(row.sequence) > configs.max_len:
             print(f'Sequence is too long ({len(row.sequence)} > {configs.max_len}), skipping')
@@ -343,7 +343,7 @@ def run() -> None:
         try:
             target_id = row.target_id
             sequence = row.sequence
-            for template_idx in range(5):
+            for template_idx in range(configs.num_templates):
                 print()
                 run_ptx(
                     target_id=target_id,
