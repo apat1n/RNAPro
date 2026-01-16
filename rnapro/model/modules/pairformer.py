@@ -33,9 +33,8 @@ from typing import Any, Optional
 
 import torch
 import torch.nn as nn
-from torch.nn.functional import one_hot
 
-from rnapro.model.modules.primitives import LinearNoBias, Transition, Linear 
+from rnapro.model.modules.primitives import LinearNoBias, Transition, Linear
 from rnapro.model.modules.transformer import AttentionPairBias
 from rnapro.model.utils import (
     pad_at_dim,
@@ -58,7 +57,6 @@ from rnapro.openfold_local.utils.checkpointing import (
     checkpoint_blocks,
     get_checkpoint_fn,
 )
-
 
 
 class PairformerBlock(nn.Module):
@@ -1018,8 +1016,6 @@ class TemplateEmbedder(nn.Module):
         return 0
 
 
-
-
 class TemplateEmbedderAllatom(nn.Module):
     """
     Implements Algorithm 16 in AF3
@@ -1081,8 +1077,7 @@ class TemplateEmbedderAllatom(nn.Module):
         self.relu = nn.ReLU()
 
         self.projection = LinearNoBias(
-            in_features=sum(self.input_feature1.values())
-            + 5 + 5,
+            in_features=sum(self.input_feature1.values()) + 5 + 5,
             out_features=sum(self.input_feature1.values())
             + sum(self.input_feature2.values()),
         )
@@ -1111,13 +1106,13 @@ class TemplateEmbedderAllatom(nn.Module):
         """
         # In this version, we do not use TemplateEmbedder by setting n_blocks=0
         # if "template_restype" not in input_feature_dict or self.n_blocks < 1:
-            # return 0
+        # return 0
         # Load relevant features
         res_type = input_feature_dict["template_restype"]
         frame_rot = input_feature_dict["template_frame_rot"]
         frame_t = input_feature_dict["template_frame_t"]
         frame_mask = input_feature_dict["template_mask_frame"]
-        cb_coords = input_feature_dict["c1_coords"]
+        # cb_coords = input_feature_dict["c1_coords"]
         ca_coords = input_feature_dict["c1_coords"]
         cb_mask = input_feature_dict["template_mask_cb"]
         template_mask = input_feature_dict["template_mask"].any(dim=1).float()
@@ -1131,17 +1126,23 @@ class TemplateEmbedderAllatom(nn.Module):
         b_cb_mask = b_cb_mask[..., None]
         b_frame_mask = b_frame_mask[..., None]
 
-        ca_coords = input_feature_dict['c1_coords']##.to(dtype)
+        ca_coords = input_feature_dict["c1_coords"]  # .to(dtype)
         B, T, _ = ca_coords.shape
-        
+
         # Compute template features
         with torch.autocast(device_type="cuda", enabled=False):
             # Compute distogram
             ca_dists = torch.cdist(ca_coords, ca_coords)
-            boundaries = torch.linspace(self.distogram['min_bin'], self.distogram['max_bin'], self.distogram['no_bins'] - 1)
+            boundaries = torch.linspace(
+                self.distogram["min_bin"],
+                self.distogram["max_bin"],
+                self.distogram["no_bins"] - 1,
+            )
             boundaries = boundaries.to(ca_dists.device)
             distogram = (ca_dists[..., None] > boundaries).sum(dim=-1).long()
-            distogram = one_hot(distogram, num_classes=self.distogram['no_bins']).float()
+            distogram = one_hot(
+                distogram, num_classes=self.distogram["no_bins"]
+            ).float()
 
             # Compute unit vector in each frame
             frame_rot = frame_rot.unsqueeze(1).transpose(-1, -2)
@@ -1151,7 +1152,6 @@ class TemplateEmbedderAllatom(nn.Module):
             norm = torch.norm(vector, dim=-1, keepdim=True)
             unit_vector = torch.where(norm > 0, vector / norm, torch.zeros_like(vector))
             unit_vector = unit_vector.squeeze(-1)
-           
 
             # Concatenate input features
             a_tij = [distogram, b_cb_mask, unit_vector, b_frame_mask]
@@ -1170,16 +1170,16 @@ class TemplateEmbedderAllatom(nn.Module):
         v = v + a_tij
         # TODO: pairformer
         # v = v.view(B * T, *v.shape[2:])
-        v = v + self.pairformer_stack(v, v, pair_mask)[1] # first v is dummy and not used because we set c_s=0 in PairformerStack
+        v = (
+            v + self.pairformer_stack(v, v, pair_mask)[1]
+        )  # first v is dummy and not used because we set c_s=0 in PairformerStack
         v = self.layernorm_v(v)
         # v = v.view(B, T, *v.shape[1:])
-
 
         # Aggregate templates
         template_mask = template_mask[:, None, None, None]
         num_templates = num_templates.unsqueeze(0)[:, None, None]
         u = (v * template_mask).sum(0) / num_templates
-
 
         # u = v.sum(dim=0)
 
@@ -1191,7 +1191,7 @@ class TemplateEmbedderAllatom(nn.Module):
         # Compute output projection
         u = self.linear_no_bias_u(self.relu(u))
         return u
-    
+
 
 class TemplateEmbedderCa(nn.Module):
     """
@@ -1261,7 +1261,6 @@ class TemplateEmbedderCa(nn.Module):
             + sum(self.input_feature2.values()),
         )
 
-
     def forward(
         self,
         input_feature_dict: dict[str, Any],
@@ -1286,33 +1285,40 @@ class TemplateEmbedderCa(nn.Module):
         """
         # In this version, we do not use TemplateEmbedder by setting n_blocks=0
         # if "template_restype" not in input_feature_dict or self.n_blocks < 1:
-            # return 0
+        # return 0
 
-        ca_coords = input_feature_dict['template_ca']##.to(dtype)
+        ca_coords = input_feature_dict["template_ca"]  # .to(dtype)
         B, T, _ = ca_coords.shape
         from torch.nn.functional import one_hot
+
         # Compute template features
         with torch.autocast(device_type="cuda", enabled=False):
             # Compute distogram
             ca_dists = torch.cdist(ca_coords, ca_coords)
             ca_dists[torch.isnan(ca_dists)] = 0.0
-            boundaries = torch.linspace(self.distogram['min_bin'], self.distogram['max_bin'], self.distogram['no_bins'] - 1)
+            boundaries = torch.linspace(
+                self.distogram["min_bin"],
+                self.distogram["max_bin"],
+                self.distogram["no_bins"] - 1,
+            )
             boundaries = boundaries.to(ca_dists.device)
             distogram = (ca_dists[..., None] > boundaries).sum(dim=-1).long()
-            distogram = one_hot(distogram, num_classes=self.distogram['no_bins']).float()
+            distogram = one_hot(
+                distogram, num_classes=self.distogram["no_bins"]
+            ).float()
 
             # TODO:Compute unit vector in each frame
 
             # TODO: Concatenate input features
-            a_tij = distogram #[distogram, b_cb_mask, unit_vector, b_frame_mask]
+            a_tij = distogram  # [distogram, b_cb_mask, unit_vector, b_frame_mask]
             # a_tij = torch.cat(a_tij, dim=-1)
 
             # TODO: Concatenate restype_i and restype_j
-            #res_type_i = res_type[:, :, :, None]
-            #res_type_j = res_type[:, :, None, :]
-            #res_type_i = res_type_i.expand(-1, -1, -1, res_type.size(2), -1)
-            #res_type_j = res_type_j.expand(-1, -1, res_type.size(2), -1, -1)
-            #a_tij = torch.cat([a_tij, res_type_i, res_type_j], dim=-1)
+            # res_type_i = res_type[:, :, :, None]
+            # res_type_j = res_type[:, :, None, :]
+            # res_type_i = res_type_i.expand(-1, -1, -1, res_type.size(2), -1)
+            # res_type_j = res_type_j.expand(-1, -1, res_type.size(2), -1, -1)
+            # a_tij = torch.cat([a_tij, res_type_i, res_type_j], dim=-1)
             a_tij = self.projection(a_tij)
             a_tij = self.linear_no_bias_a(a_tij)
 
@@ -1321,15 +1327,16 @@ class TemplateEmbedderCa(nn.Module):
         v = v + a_tij
         # TODO: pairformer
         # v = v.view(B * T, *v.shape[2:])
-        v = v + self.pairformer_stack(v, v, pair_mask)[1] # first v is dummy and not used because we set c_s=0 in PairformerStack
+        v = (
+            v + self.pairformer_stack(v, v, pair_mask)[1]
+        )  # first v is dummy and not used because we set c_s=0 in PairformerStack
         v = self.layernorm_v(v)
-
 
         template_mask = ca_coords.sum(1).sum(1) != 0
         template_mask = template_mask.unsqueeze(1).unsqueeze(1).unsqueeze(1)
 
         v = v * template_mask
-        u = v.sum(dim=0) 
+        u = v.sum(dim=0)
         u = u / (torch.clamp(template_mask.sum(), min=1))
 
         u = self.linear_no_bias_u(self.relu(u))
@@ -1339,13 +1346,13 @@ class TemplateEmbedderCa(nn.Module):
 class RNATemplateEmbedder(nn.Module):
     """
     RNA Template Embedder for processing RNA structural templates.
-    
+
     This module processes RNA template structures by:
     1. Embedding distance information from template coordinates
     2. Processing through pairformer attention blocks
     3. Averaging over multiple templates
     4. Outputting template-informed pair representations
-    
+
     Args:
         n_blocks (int): Number of pairformer blocks for processing. Default: 2
         c_s (int): Dimension of single representation. Default: 64
@@ -1372,14 +1379,14 @@ class RNATemplateEmbedder(nn.Module):
         distance_bin_step: float = 1.25,
         zero_init_final_linear: bool = True,
     ) -> None:
-        
+
         super(RNATemplateEmbedder, self).__init__()
 
         self.n_blocks = n_blocks
         self.c_s = c_s
         self.c_z = c_z
         self.c_s_inputs = c_s_inputs
-        
+
         # Distance binning parameters
         self.distance_bin_start = distance_bin_start
         self.distance_bin_end = distance_bin_end
@@ -1399,7 +1406,7 @@ class RNATemplateEmbedder(nn.Module):
         self.linear_no_bias_chem = Linear(
             in_features=1, out_features=self.c_s, bias=False
         )
-        
+
         # Linear layers for combining s_inputs with pair features
         self.linear_no_bias_s1 = Linear(
             in_features=self.c_s_inputs, out_features=self.c_z, bias=False
@@ -1464,30 +1471,37 @@ class RNATemplateEmbedder(nn.Module):
             triangle_attention (bool): Enable triangle attention
             inplace_safe (bool): Enable in-place operations for memory efficiency
             chunk_size (Optional[int]): Chunk size for memory-efficient processing
-            
+
         Returns:
-            torch.Tensor: Template-enhanced pair representations [..., N_token, N_token, c_z]    
+            torch.Tensor: Template-enhanced pair representations [..., N_token, N_token, c_z]
         """
         if self.n_blocks < 1:
             return z
 
-        if "n_templates" not in input_feature_dict or input_feature_dict["n_templates"] < 1:
+        if (
+            "n_templates" not in input_feature_dict
+            or input_feature_dict["n_templates"] < 1
+        ):
             return z
-        
+
         # Extract C1' template coordinates and masks
-        n_templates = input_feature_dict['n_templates']
-        template_coords = input_feature_dict['template_coords']  # [..., n_templates, N_token, 3]
-        template_coords_mask = input_feature_dict['template_coords_mask']  # [..., n_templates, N_token]
-        
+        n_templates = input_feature_dict["n_templates"]
+        template_coords = input_feature_dict[
+            "template_coords"
+        ]  # [..., n_templates, N_token, 3]
+        template_coords_mask = input_feature_dict[
+            "template_coords_mask"
+        ]  # [..., n_templates, N_token]
+
         # Initialize single features
         s = self.input_s_ln(torch.clamp(s, min=-512, max=512))
-        if 'chemical_mapping_profile' in input_feature_dict:
+        if "chemical_mapping_profile" in input_feature_dict:
             # Embed and add 1D chemical mapping profile if available
-            chemical_mapping_profile = input_feature_dict['chemical_mapping_profile']  # [..., N_token]
-            s = s + self.linear_no_bias_chem(
-                chemical_mapping_profile.unsqueeze(dim=-1)
-            )
-        
+            chemical_mapping_profile = input_feature_dict[
+                "chemical_mapping_profile"
+            ]  # [..., N_token]
+            s = s + self.linear_no_bias_chem(chemical_mapping_profile.unsqueeze(dim=-1))
+
         # Initialize pair features with single feature projections
         z_init = (
             self.linear_no_bias_s1(s_inputs)[..., None, :, :]
@@ -1499,12 +1513,12 @@ class RNATemplateEmbedder(nn.Module):
 
         # Process each template individually
         for idx in range(n_templates):
-            
+
             # Start with initial pair features
             z_pair = z_init + z
 
             # Add distance information to pair features
-            with torch.cuda.amp.autocast(enabled=False):
+            with torch.amp.autocast("cuda", enabled=False):
                 _template_coords = template_coords[..., idx, :, :].to(torch.float32)
                 _mask = (
                     template_coords_mask[..., idx, :][..., :, None]
@@ -1525,22 +1539,27 @@ class RNATemplateEmbedder(nn.Module):
                         x=distance_pred,
                         lower_bins=self.lower_bins,
                         upper_bins=self.upper_bins,
-                    ) * _mask[..., None]
+                    )
+                    * _mask[..., None]
                 )
-                z_pair += self.linear_no_bias_d_wo_onehot(
-                    distance_pred.unsqueeze(dim=-1)
-                ) * _mask[..., None]
+                z_pair += (
+                    self.linear_no_bias_d_wo_onehot(distance_pred.unsqueeze(dim=-1))
+                    * _mask[..., None]
+                )
             else:
                 z_pair = z_pair + self.linear_no_bias_d(
                     one_hot(
                         x=distance_pred,
                         lower_bins=self.lower_bins,
                         upper_bins=self.upper_bins,
-                    ) * _mask[..., None]
+                    )
+                    * _mask[..., None]
                 )
-                z_pair = z_pair + self.linear_no_bias_d_wo_onehot(
-                    distance_pred.unsqueeze(dim=-1)
-                ) * _mask[..., None]
+                z_pair = (
+                    z_pair
+                    + self.linear_no_bias_d_wo_onehot(distance_pred.unsqueeze(dim=-1))
+                    * _mask[..., None]
+                )
 
             # Process through pairformer stack
             _, z_pair = self.pairformer_stack(
@@ -1556,7 +1575,7 @@ class RNATemplateEmbedder(nn.Module):
 
             # Accumulate results
             z_template += z_pair
-        
+
         # Average over templates
         z_template = z_template / n_templates
 

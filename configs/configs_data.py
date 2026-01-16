@@ -160,7 +160,7 @@ if (
     or (not os.path.exists(CCD_COMPONENTS_RDKIT_MOL_FILE_PATH))
     or (not os.path.exists(PDB_CLUSTER_FILE_PATH))
 ):
-    print("Try to find the ccd cache data in the code directory for inference.")
+    # print("Try to find the ccd cache data in the code directory for inference.")
     current_file_path = os.path.abspath(__file__)
     current_directory = os.path.dirname(current_file_path)
     code_directory = os.path.dirname(current_directory)

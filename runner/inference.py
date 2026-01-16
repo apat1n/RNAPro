@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os 
+import os
 import shutil
 import logging
 import traceback
@@ -21,12 +21,9 @@ from contextlib import nullcontext
 from os.path import join as opjoin
 from typing import Any, Mapping
 
-import json
 import torch
 import pandas as pd
 import numpy as np
-from tqdm import tqdm
-from biotite.structure.io import pdbx
 
 from configs.configs_base import configs as configs_base
 from configs.configs_data import data_configs
@@ -40,24 +37,22 @@ from rnapro.utils.distributed import DIST_WRAPPER
 from rnapro.utils.seed import seed_everything
 from rnapro.utils.torch_utils import to_device
 
-
-class dotdict(dict):
-	__setattr__ = dict.__setitem__
-	__delattr__ = dict.__delitem__
-
-	def __getattr__(self, name):
-		try:
-			return self[name]
-		except KeyError:
-			raise AttributeError(name)
-
-
-logger = logging.getLogger(__name__)
+from rnapro.utils.inference import (
+    update_inference_configs,
+    make_dummy_solution,
+    solution_to_submit_df,
+    process_sequence,
+    extract_c1_coordinates,
+)
 
 
 class InferenceRunner(object):
     def __init__(self, configs: Any) -> None:
+        if configs.logger == "logging":
+            self.logger = logging.getLogger(__name__)
+
         self.configs = configs
+
         self.init_env()
         self.init_basics()
         self.init_model()
@@ -78,7 +73,7 @@ class InferenceRunner(object):
             os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
             all_gpu_ids = ",".join(str(x) for x in range(torch.cuda.device_count()))
             devices = os.getenv("CUDA_VISIBLE_DEVICES", all_gpu_ids)
-            logging.info(
+            self.print(
                 f"LOCAL_RANK: {DIST_WRAPPER.local_rank} - CUDA_VISIBLE_DEVICES: [{devices}]"
             )
             torch.cuda.set_device(self.device)
@@ -91,16 +86,16 @@ class InferenceRunner(object):
                 env is not None
             ), "if use ds4sci, set `CUTLASS_PATH` env as https://www.deepspeed.ai/tutorials/ds4sci_evoformerattention/"
             if env is not None:
-                logging.info(
+                self.print(
                     "The kernels will be compiled when DS4Sci_EvoformerAttention is called for the first time."
                 )
         use_fastlayernorm = os.getenv("LAYERNORM_TYPE", None)
         if use_fastlayernorm == "fast_layernorm":
-            logging.info(
+            self.print(
                 "The kernels will be compiled when fast_layernorm is called for the first time."
             )
 
-        logging.info("Finished init ENV.")
+        self.print("Finished initializing environment !")
 
     def init_basics(self) -> None:
         self.dump_dir = self.configs.dump_dir
@@ -109,17 +104,13 @@ class InferenceRunner(object):
         os.makedirs(self.error_dir, exist_ok=True)
 
     def init_model(self) -> None:
-        
         self.model = RNAPro(self.configs).to(self.device)
-        print(self.model)
         num_params = sum(p.numel() for p in self.model.parameters())
-        print(f"Total number of parameters: {num_params:,}")
-        
+        self.print(f"Built model ! Total number of parameters: {num_params:,}")
 
     def load_checkpoint(self) -> None:
         checkpoint_path = self.configs.load_checkpoint_path
-        print(checkpoint_path)
-        
+
         if not os.path.exists(checkpoint_path):
             raise Exception(f"Given checkpoint path not exist [{checkpoint_path}]")
         self.print(
@@ -128,7 +119,7 @@ class InferenceRunner(object):
         checkpoint = torch.load(checkpoint_path, self.device)
 
         sample_key = [k for k in checkpoint["model"].keys()][0]
-        self.print(f"Sampled key: {sample_key}")
+        # self.print(f"Sampled key: {sample_key}")
         if sample_key.startswith("module."):  # DDP checkpoint has module. prefix
             checkpoint["model"] = {
                 k[len("module."):]: v for k, v in checkpoint["model"].items()
@@ -138,7 +129,7 @@ class InferenceRunner(object):
             strict=True,
         )
         self.model.eval()
-        self.print(f"Finish loading checkpoint.")
+        # self.print("Finish loading checkpoint.")
 
     def init_dumper(
         self, need_atom_confidence: bool = False, sorted_by_ranking_score: bool = True
@@ -153,6 +144,9 @@ class InferenceRunner(object):
         for k, v in d.items():
             if isinstance(v, torch.Tensor):
                 print(f"{k}: ", v.shape)
+            else:
+                pass
+                # print(f"{k}: {v}")
 
     # Adapted from runner.train.Trainer.evaluate
     @torch.no_grad()
@@ -162,12 +156,14 @@ class InferenceRunner(object):
             "bf16": torch.bfloat16,
             "fp16": torch.float16,
         }[self.configs.dtype]
-        print('eval_precision: ', eval_precision)
+        # print("eval_precision: ", eval_precision)
         enable_amp = (
             torch.autocast(device_type="cuda", dtype=eval_precision)
             if torch.cuda.is_available()
             else nullcontext()
         )
+        #         print('input_feature_dict: ', self.print_dict(data["input_feature_dict"]))
+        #         exit(0)
 
         data = to_device(data, self.device)
         with enable_amp:
@@ -182,41 +178,34 @@ class InferenceRunner(object):
 
     def print(self, msg: str):
         if DIST_WRAPPER.rank == 0:
-            logger.info(msg)
+            if self.configs.logger == "logging":
+                self.logger.info(msg)
+            elif self.configs.logger == "print":
+                print(msg)
 
     def update_model_configs(self, new_configs: Any) -> None:
         self.model.configs = new_configs
 
 
-def update_inference_configs(configs: Any, N_token: int):
-    # Setting the default inference configs for different N_token and N_atom
-    # when N_token is larger than 3000, the default config might OOM even on a
-    # A100 80G GPUS,
-    if N_token > 3840:
-        configs.skip_amp.confidence_head = False
-        configs.skip_amp.sample_diffusion = False
-    elif N_token > 2560:
-        configs.skip_amp.confidence_head = False
-        configs.skip_amp.sample_diffusion = True
-    else:
-        configs.skip_amp.confidence_head = True
-        configs.skip_amp.sample_diffusion = True
-    return configs
-
-
 def infer_predict(runner: InferenceRunner, configs: Any) -> None:
-    # Data
-    logger.info(f"Loading data from\n{configs.input_json_path}")
+    """
+    Infer the sequence for a given runner and configs.
+
+    Args:
+        runner (InferenceRunner): The runner to be used.
+        configs (ConfigDict): The configurations for the inference.
+    """
+    # Load the dataloader
     try:
         dataloader = get_inference_dataloader(configs=configs)
     except Exception as e:
         error_message = f"{e}:\n{traceback.format_exc()}"
-        logger.info(error_message)
+        runner.print(error_message)
         with open(opjoin(runner.error_dir, "error.txt"), "a") as f:
             f.write(error_message)
         return
 
-    num_data = len(dataloader.dataset)
+    # num_data = len(dataloader.dataset)
     for seed in configs.seeds:
         seed_everything(seed=seed, deterministic=configs.deterministic)
         for batch in dataloader:
@@ -225,21 +214,25 @@ def infer_predict(runner: InferenceRunner, configs: Any) -> None:
                 sample_name = data["sample_name"]
 
                 if len(data_error_message) > 0:
-                    logger.info(data_error_message)
+                    runner.print(data_error_message)
                     with open(opjoin(runner.error_dir, f"{sample_name}.txt"), "a") as f:
                         f.write(data_error_message)
                     continue
 
-                logger.info(
-                    (
-                        f"[Rank {DIST_WRAPPER.rank} ({data['sample_index'] + 1}/{num_data})] {sample_name}: "
-                        f"N_asym {data['N_asym'].item()}, N_token {data['N_token'].item()}, "
-                        f"N_atom {data['N_atom'].item()}, N_msa {data['N_msa'].item()}"
-                    )
-                )
+                # runner.print(
+                #     (
+                #         f"[Rank {DIST_WRAPPER.rank} ({data['sample_index'] + 1}/{num_data})] {sample_name}: "
+                #         f"N_asym {data['N_asym'].item()}, N_token {data['N_token'].item()}, "
+                #         f"N_atom {data['N_atom'].item()}, N_msa {data['N_msa'].item()}"
+                #     )
+                # )
                 new_configs = update_inference_configs(configs, data["N_token"].item())
                 runner.update_model_configs(new_configs)
+
+                # Predict
                 prediction = runner.predict(data)
+
+                # Save
                 runner.dumper.dump(
                     dataset_name="",
                     pdb_id=sample_name,
@@ -249,137 +242,51 @@ def infer_predict(runner: InferenceRunner, configs: Any) -> None:
                     entity_poly_type=data["entity_poly_type"],
                 )
 
-                logger.info(
-                    f"[Rank {DIST_WRAPPER.rank}] {data['sample_name']} succeeded.\n"
-                    f"Results saved to {configs.dump_dir}"
-                )
+                runner.print(f"Results saved to {configs.dump_dir}/{sample_name}/seed_{seed}/predictions/")
                 torch.cuda.empty_cache()
             except Exception as e:
                 error_message = f"[Rank {DIST_WRAPPER.rank}]{data['sample_name']} {e}:\n{traceback.format_exc()}"
-                logger.info(error_message)
+                runner.print(error_message)
                 # Save error info
                 with open(opjoin(runner.error_dir, f"{sample_name}.txt"), "a") as f:
                     f.write(error_message)
                 if hasattr(torch.cuda, "empty_cache"):
                     torch.cuda.empty_cache()
 
-# data helper
-def make_dummy_solution(valid_df):
-    solution=dotdict()
-    for i, row in valid_df.iterrows():
-        target_id = row.target_id
-        sequence = row.sequence
-        solution[target_id]=dotdict(
-            target_id=target_id,
-            sequence=sequence,
-            coord=[],
-        )
-    return solution
 
-def solution_to_submit_df(solution):
-    submit_df = []
-    for k,s in solution.items():
-        df = coord_to_df(s.sequence, s.coord, s.target_id)
-        submit_df.append(df)
-    
-    submit_df = pd.concat(submit_df)
-    return submit_df
- 
+def run_ptx(target_id, sequence, configs, solution, template_idx, runner):
+    """
+    Run the inference for a given target_id, sequence, configs, solution, and template_idx.
 
-def coord_to_df(sequence, coord, target_id):
-    L = len(sequence)
-    df = pd.DataFrame()
-    df['ID'] = [f'{target_id}_{i + 1}' for i in range(L)]
-    df['resname'] = [s for s in sequence]
-    df['resid'] = [i + 1 for i in range(L)]
-
-    num_coord = len(coord)
-    for j in range(num_coord):
-        df[f'x_{j+1}'] = coord[j][:, 0]
-        df[f'y_{j+1}'] = coord[j][:, 1]
-        df[f'z_{j+1}'] = coord[j][:, 2]
-    return df
-
-
-def main(configs: Any) -> None:
-    # Runner
-    runner = InferenceRunner(configs)
-    infer_predict(runner, configs)
-
-
-def create_input_json(sequence, target_id):
-    print('input_no_msa')
-    input_json = [{
-        "sequences": [
-            {
-                "rnaSequence": {
-                    "sequence": sequence,
-                    "count": 1,
-                }
-            }
-        ],
-        "name": target_id,
-    }]
-    return input_json
-
-def extract_c1_coordinates(cif_file_path):
-    try:
-        # Read the CIF file using the correct biotite method
-        with open(cif_file_path, 'r') as f:
-            cif_data = pdbx.CIFFile.read(f)
-        
-        # Get structure from CIF data
-        atom_array = pdbx.get_structure(cif_data, model=1)
-        
-        # Clean atom names and find C1' atoms
-        atom_names_clean = np.char.strip(atom_array.atom_name.astype(str))
-        mask_c1 = atom_names_clean == "C1'"
-        c1_atoms = atom_array[mask_c1]
-        
-        if len(c1_atoms) == 0:
-            print(f"Warning: No C1' atoms found in {cif_file_path}")
-            return None
-        
-        # Sort by residue ID and return coordinates
-        sort_indices = np.argsort(c1_atoms.res_id)
-        c1_atoms_sorted = c1_atoms[sort_indices]
-        c1_coords = c1_atoms_sorted.coord
-        
-        return c1_coords
-    except Exception as e:
-        print(f"Error extracting C1' coordinates from {cif_file_path}: {e}")
-        return None
-
-def process_sequence(sequence, target_id, temp_dir):
-    print(f"Processing {target_id}: {sequence}")
-
-    # Create input JSON
-    input_json = create_input_json(sequence, target_id)
-    
-    # Save JSON to temporary file
-    os.makedirs(temp_dir, exist_ok=True)
-    input_json_path = os.path.join(temp_dir, f"{target_id}_input.json")
-    with open(input_json_path, "w") as f:
-        json.dump(input_json, f, indent=4)
-
-
-def run_ptx(target_id, sequence, configs, solution, template_idx):
+    Args:
+        target_id (str): The target_id of the sequence.
+        sequence (str): The sequence to be inferred.
+        configs (ConfigDict): The configurations for the inference.
+        solution (DotDict): The solution to be updated.
+        template_idx (int): The template index to be used.
+        runner (InferenceRunner): The runner to be used.
+    """
     # Create directories
     temp_dir = f"./{configs.dump_dir}/input"  # Same as in kaggle_inference.py
     output_dir = f"./{configs.dump_dir}/output"  # Same as in kaggle_inference.py
     os.makedirs(temp_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
-    
+
     process_sequence(sequence=sequence, target_id=target_id, temp_dir=temp_dir)
     configs.input_json_path = os.path.join(temp_dir, f"{target_id}_input.json")
     configs.template_idx = int(template_idx)
 
-    runner = InferenceRunner(configs)
+    # Run the inference
     infer_predict(runner, configs)
 
-    cif_file_path = f'{configs.dump_dir}/{target_id}/seed_42/predictions/{target_id}_sample_0.cif'
-    cif_new_path = f'{configs.dump_dir}/{target_id}/seed_42/predictions/{target_id}_sample_{template_idx}_new.cif'
+    # Copy the CIF file to the new path
+    cif_file_path = (
+        f"{configs.dump_dir}/{target_id}/seed_42/predictions/{target_id}_sample_0.cif"
+    )
+    cif_new_path = f"{configs.dump_dir}/{target_id}/seed_42/predictions/{target_id}_sample_{template_idx}_new.cif"
     shutil.copy(cif_file_path, cif_new_path)
+
+    # Extract the C1 coordinates
     coord = extract_c1_coordinates(cif_file_path)
     if coord is None:
         coord = np.zeros((len(sequence), 3), dtype=np.float32)
@@ -387,6 +294,8 @@ def run_ptx(target_id, sequence, configs, solution, template_idx):
         pad_len = len(sequence) - coord.shape[0]
         pad = np.zeros((pad_len, 3), dtype=np.float32)
         coord = np.concatenate([coord, pad], axis=0)
+
+    # Update the solution
     solution[target_id].coord.append(coord)
 
 
@@ -394,10 +303,13 @@ def run() -> None:
     LOG_FORMAT = "%(asctime)s,%(msecs)-3d %(levelname)-8s [%(filename)s:%(lineno)s %(funcName)s] %(message)s"
     logging.basicConfig(
         format=LOG_FORMAT,
-        level=logging.INFO,
+        level=logging.WARNING,
         datefmt="%Y-%m-%d %H:%M:%S",
         filemode="w",
     )
+    # Silence dataloader logging
+    logging.getLogger("rnapro.data").setLevel(logging.WARNING)
+
     configs_base["use_deepspeed_evo_attention"] = (
         os.environ.get("USE_DEEPSPEED_EVO_ATTENTION", False) == "true"
     )
@@ -409,23 +321,47 @@ def run() -> None:
     )
 
     valid_df = pd.read_csv(configs.sequences_csv)
-    print(f"Loaded {len(valid_df)} valid sequences")
+    print(f"\n -> Loaded {len(valid_df)} sequence(s)")
+
+    # Build model and load checkpoint once before looping over sequences
+
+    print('\n -> Building model and loading checkpoint\n')
+    runner = InferenceRunner(configs)
+    print('\n -> Done, starting inference...')
 
     solution = make_dummy_solution(valid_df)
-    for idx, row in tqdm(valid_df.iterrows()):
+    for idx, row in valid_df.iterrows():
+        print(f"\n -> Sequence {row.target_id}: {row.sequence}")
+
+        if len(row.sequence) > configs.max_len:
+            print(f'Sequence is too long ({len(row.sequence)} > {configs.max_len}), skipping')
+            for template_idx in range(5):
+                coord = np.zeros((len(row.sequence), 3), dtype=np.float32)
+                solution[row.target_id].coord.append(coord)
+            continue
+
         try:
             target_id = row.target_id
             sequence = row.sequence
-            for template_idx in tqdm(range(5)):
-                run_ptx(target_id=target_id, sequence=sequence, configs=configs, solution=solution, 
-                template_idx=template_idx)
+            for template_idx in range(5):
+                print()
+                run_ptx(
+                    target_id=target_id,
+                    sequence=sequence,
+                    configs=configs,
+                    solution=solution,
+                    template_idx=template_idx,
+                    runner=runner,
+                )
         except Exception as e:
             print(f"Error processing {row.target_id}: {e}")
             continue
+
+    print('\n\n -> Inference done ! Saving to submission.csv')
     submit_df = solution_to_submit_df(solution)
     submit_df = submit_df.fillna(0.0)
     submit_df.to_csv("./submission.csv", index=False)
-    print(submit_df)
+
 
 if __name__ == "__main__":
     run()
