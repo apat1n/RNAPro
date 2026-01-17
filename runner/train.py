@@ -33,7 +33,6 @@ import logging
 import os
 import glob
 import re
-import time
 from argparse import Namespace
 from contextlib import nullcontext
 
@@ -89,7 +88,7 @@ class AF3Trainer(object):
         # Add for grad accumulation, it can increase real batch size
         self.iters_to_accumulate = self.configs.iters_to_accumulate
 
-        self.run_name = self.configs.run_name #+ "_" + time.strftime("%Y%m%d_%H%M%S")
+        self.run_name = self.configs.run_name  # + "_" + time.strftime("%Y%m%d_%H%M%S")
         run_names = DIST_WRAPPER.all_gather_object(
             self.run_name if DIST_WRAPPER.rank == 0 else None
         )
@@ -183,7 +182,7 @@ class AF3Trainer(object):
         self.raw_model = RNAPro(self.configs).to(self.device)
         self.use_ddp = False
         if DIST_WRAPPER.world_size > 1:
-            self.print(f"Using DDP")
+            self.print("Using DDP")
             self.use_ddp = True
             # Fix DDP/checkpoint https://discuss.pytorch.org/t/ddp-and-gradient-checkpointing/132244
             self.model = DDP(
@@ -255,8 +254,9 @@ class AF3Trainer(object):
             torch.save(checkpoint, path)
             self.print(f"Saved checkpoint to {path}")
 
-
-    def find_checkpoint_pairs_in_directory(self, checkpoint_dir: str) -> list[tuple[int, str, str]]:
+    def find_checkpoint_pairs_in_directory(
+        self, checkpoint_dir: str
+    ) -> list[tuple[int, str, str]]:
         """
         Find (step.pt, step_ema_0.995.pt) pairs in the given directory.
         Returns a list of tuples: (step, checkpoint_path, ema_checkpoint_path)
@@ -265,51 +265,51 @@ class AF3Trainer(object):
         if not os.path.exists(checkpoint_dir):
             self.print(f"Checkpoint directory not found: {checkpoint_dir}")
             return []
-        
+
         # Find all .pt files
         pt_files = glob.glob(os.path.join(checkpoint_dir, "*.pt"))
         if not pt_files:
             self.print(f"No .pt files found in {checkpoint_dir}")
             return []
-        
+
         # Parse step files and ema files
         step_files = {}  # step -> path
-        ema_files = {}   # step -> path
-        
+        ema_files = {}  # step -> path
+
         for file_path in pt_files:
             filename = os.path.basename(file_path)
-            
+
             # Check for EMA files: {step}_ema_0.995.pt
-            ema_match = re.match(r'(\d+)_ema_0\.995\.pt$', filename)
+            ema_match = re.match(r"(\d+)_ema_0\.995\.pt$", filename)
             if ema_match:
                 step = int(ema_match.group(1))
                 ema_files[step] = file_path
                 continue
-            
+
             # Check for regular checkpoint files: {step}.pt
-            step_match = re.match(r'(\d+)\.pt$', filename)
+            step_match = re.match(r"(\d+)\.pt$", filename)
             if step_match:
                 step = int(step_match.group(1))
                 step_files[step] = file_path
-        
+
         # Find steps that have both checkpoint and EMA files
         valid_pairs = []
         for step in step_files:
             if step in ema_files:
                 valid_pairs.append((step, step_files[step], ema_files[step]))
-        
+
         # Sort by step number in descending order (newest first)
         valid_pairs.sort(key=lambda x: x[0], reverse=True)
-        
-        self.print(f"Found {len(valid_pairs)} valid checkpoint pairs in {checkpoint_dir}")
+
+        self.print(
+            f"Found {len(valid_pairs)} valid checkpoint pairs in {checkpoint_dir}"
+        )
         for step, checkpoint_path, ema_path in valid_pairs:
-            self.print(f"  Step {step}: {os.path.basename(checkpoint_path)} + {os.path.basename(ema_path)}")
-        
+            self.print(
+                f"  Step {step}: {os.path.basename(checkpoint_path)} + {os.path.basename(ema_path)}"
+            )
+
         return valid_pairs
-
-
-
-
 
     def try_load_checkpoint(self):
 
@@ -324,7 +324,7 @@ class AF3Trainer(object):
             if not os.path.exists(checkpoint_path):
                 raise Exception(f"Given checkpoint path not exist [{checkpoint_path}]")
             self.print(
-                f"Loading from {checkpoint_path}, strict: {self.configs.load_strict}"
+                f"Loading weights from {checkpoint_path}  (strict={self.configs.load_strict})"
             )
             checkpoint = torch.load(checkpoint_path, self.device)
             sample_key = [k for k in checkpoint["model"].keys()][0]
@@ -332,25 +332,25 @@ class AF3Trainer(object):
             if sample_key.startswith("module.") and not self.use_ddp:
                 # DDP checkpoint has module. prefix
                 checkpoint["model"] = {
-                    k[len("module.") :]: v for k, v in checkpoint["model"].items()
+                    k[len("module."):]: v for k, v in checkpoint["model"].items()
                 }
 
             self.model.load_state_dict(
                 state_dict=checkpoint["model"],
                 strict=self.configs.load_strict,
             )
-            print('#'*20, checkpoint_path, 'loaded')
+            print("#" * 20, checkpoint_path, "loaded")
             if not load_params_only:
                 if not skip_load_optimizer:
-                    self.print(f"Loading optimizer state")
+                    self.print("Loading optimizer state")
                     self.optimizer.load_state_dict(checkpoint["optimizer"])
                 if not skip_load_step:
-                    self.print(f"Loading checkpoint step")
+                    self.print("Loading checkpoint step")
                     self.step = checkpoint["step"] + 1
                     self.start_step = self.step
                     self.global_step = self.step * self.iters_to_accumulate
                 if not skip_load_scheduler:
-                    self.print(f"Loading scheduler state")
+                    self.print("Loading scheduler state")
                     self.lr_scheduler.load_state_dict(checkpoint["scheduler"])
                 elif load_step_for_scheduler:
                     assert (
@@ -361,8 +361,10 @@ class AF3Trainer(object):
 
             self.print(f"Finish loading checkpoint, current step: {self.step}")
 
-        if os.path.isfile(self.configs.load_checkpoint_path) and os.path.isfile(self.configs.load_ema_checkpoint_path):
-            print('#'*20, 'checkpoints', self.configs.load_checkpoint_path)
+        if os.path.isfile(self.configs.load_checkpoint_path) and os.path.isfile(
+            self.configs.load_ema_checkpoint_path
+        ):
+            print("#" * 20, "checkpoints", self.configs.load_checkpoint_path)
             # File path is directly given
             checkpoint_path = self.configs.load_checkpoint_path
             ema_checkpoint_path = self.configs.load_ema_checkpoint_path
@@ -386,13 +388,14 @@ class AF3Trainer(object):
             print(f"Loaded checkpoint: {checkpoint_path}")
             print(f"Loaded ema checkpoint: {ema_checkpoint_path}")
 
-
         elif os.path.isdir(self.configs.load_checkpoint_path):
             # Directory is given - find highest step from all subdirectories
-            valid_pairs = self.find_checkpoint_pairs_in_directory(self.configs.load_checkpoint_path)
+            valid_pairs = self.find_checkpoint_pairs_in_directory(
+                self.configs.load_checkpoint_path
+            )
 
             for step, checkpoint_path, ema_checkpoint_path in valid_pairs:
-                print('#'*20, step, checkpoint_path, ema_checkpoint_path)
+                print("#" * 20, step, checkpoint_path, ema_checkpoint_path)
                 try:
                     # Load EMA model parameters
                     if ema_checkpoint_path:
@@ -445,16 +448,16 @@ class AF3Trainer(object):
     def model_forward(self, batch: dict, mode: str = "train") -> tuple[dict, dict]:
         assert mode in ["train", "eval"]
         batch["label_full_dict"] = {
-            'entity_mol_id': batch["input_feature_dict"]["entity_mol_id"],
-            'mol_id':  batch["input_feature_dict"]["mol_id"],
-            'mol_atom_index': batch["input_feature_dict"]["mol_atom_index"],
+            "entity_mol_id": batch["input_feature_dict"]["entity_mol_id"],
+            "mol_id": batch["input_feature_dict"]["mol_id"],
+            "mol_atom_index": batch["input_feature_dict"]["mol_atom_index"],
         }
         batch["label_dict"] = {
             "coordinate": batch["coordinate"],
             "coordinate_mask": batch["coordinate_mask"],
         }
-        if 'coordinate_multi' in batch.keys():
-            batch["label_dict"]['coordinate_multi'] = batch["coordinate_multi"]
+        if "coordinate_multi" in batch.keys():
+            batch["label_dict"]["coordinate_multi"] = batch["coordinate_multi"]
 
         batch["label_full_dict"].update(batch["label_dict"])
 
@@ -468,7 +471,6 @@ class AF3Trainer(object):
         )
 
         return batch, log_dict
-
 
     def get_loss(
         self, batch: dict, mode: str = "train"
@@ -534,7 +536,7 @@ class AF3Trainer(object):
             total_batch_num = len(test_dl)
             for index, batch in enumerate(tqdm(test_dl)):
                 if isinstance(batch, list):
-                    print('len batch: ', len(batch))
+                    print("len batch: ", len(batch))
                     batch = batch[0]
 
                 batch = to_device(batch, self.device)
@@ -694,7 +696,7 @@ class AF3Trainer(object):
                 step_need_save &= is_update_step
 
                 if isinstance(batch, list):
-                    print('len batch: ', len(batch))
+                    print("len batch: ", len(batch))
                     batch = batch[0]
 
                 batch = to_device(batch, self.device)

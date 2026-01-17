@@ -55,7 +55,7 @@ class TrainingNoiseSampler:
         self.sigma_data = sigma_data
         self.p_mean = p_mean
         self.p_std = p_std
-        print(f"train scheduler {self.sigma_data}")
+        # print(f"train scheduler {self.sigma_data}")
 
     def __call__(
         self, size: torch.Size, device: torch.device = torch.device("cpu")
@@ -98,7 +98,7 @@ class InferenceNoiseScheduler:
         self.s_max = s_max
         self.s_min = s_min
         self.rho = rho
-        print(f"inference scheduler {self.sigma_data}")
+        # print(f"inference scheduler {self.sigma_data}")
 
     def __call__(
         self,
@@ -330,10 +330,10 @@ def sample_diffusion_training(
         )
         for i in range(no_chunks):
             x_noisy_i = (x_gt_augment + noise)[
-                ..., i * diffusion_chunk_size : (i + 1) * diffusion_chunk_size, :, :
+                ..., i * diffusion_chunk_size: (i + 1) * diffusion_chunk_size, :, :
             ]
             t_hat_noise_level_i = sigma[
-                ..., i * diffusion_chunk_size : (i + 1) * diffusion_chunk_size
+                ..., i * diffusion_chunk_size: (i + 1) * diffusion_chunk_size
             ]
             x_denoised_i = denoise_net(
                 x_noisy=x_noisy_i,

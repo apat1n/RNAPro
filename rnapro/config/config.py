@@ -222,7 +222,7 @@ class ConfigManager(object):
 
 def parse_configs(
     configs: dict, arg_str: str = None, fill_required_with_null: bool = False
-) -> ConfigDict:
+):
     """
     Parses and merges configuration settings from a dictionary and command-line arguments.
 
@@ -237,6 +237,30 @@ def parse_configs(
     """
     manager = ConfigManager(configs, fill_required_with_null=fill_required_with_null)
     parser = argparse.ArgumentParser()
+
+    # This is new
+    parser.add_argument(
+        "--max_len",
+        type=int,
+        default=10000,
+        required=False,
+        help="Maximum length of the sequence. Longer sequences will be skipped during inference"
+    )
+    parser.add_argument(
+        "--logger",
+        type=str,
+        default="logging",
+        required=False,
+        help="Logger to use during inference. Supports 'logging' and 'print'"
+    )
+    parser.add_argument(
+        "--n_templates_inf",
+        type=int,
+        default=5,
+        required=False,
+        help="Number of templates to use during inference"
+    )
+
     # Register arguments
     for key, (
         dtype,
@@ -252,6 +276,12 @@ def parse_configs(
     merged_configs = manager.merge_configs(
         vars(parser.parse_args(arg_str.split())) if arg_str else {}
     )
+
+    args = parser.parse_args(arg_str.split())
+    merged_configs.max_len = args.max_len
+    merged_configs.logger = args.logger
+    merged_configs.n_templates_inf = args.n_templates_inf
+
     return merged_configs
 
 
