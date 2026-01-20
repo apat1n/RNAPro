@@ -51,6 +51,7 @@ from rnapro.config.config import save_config
 from rnapro.data.rna_dataset_allatom_loader import get_dataloaders
 
 from rnapro.metrics.lddt_metrics import LDDTMetrics
+from rnapro.metrics.tm_score import TMScoreMetrics
 from rnapro.model.loss import RNAProLoss
 from rnapro.model.RNAPro import RNAPro
 from rnapro.utils.distributed import DIST_WRAPPER
@@ -129,6 +130,7 @@ class AF3Trainer(object):
         self.train_metric_wrapper = SimpleMetricAggregator(["avg"])
 
     def init_env(self):
+        torch.backends.cuda.matmul.allow_tf32 = True
         """Init pytorch/cuda envs."""
         logging.info(
             f"Distributed environment: world size: {DIST_WRAPPER.world_size}, "
@@ -177,6 +179,10 @@ class AF3Trainer(object):
             self.configs, error_dir=self.error_dir
         )
         self.lddt_metrics = LDDTMetrics(self.configs)
+        # Initialize TM-score metrics if enabled
+        self.use_tm_score = self.configs.get("use_tm_score", True)  # Default: enabled
+        if self.use_tm_score:
+            self.tm_score_metrics = TMScoreMetrics(self.configs)
 
     def init_model(self):
         self.raw_model = RNAPro(self.configs).to(self.device)
@@ -535,12 +541,12 @@ class AF3Trainer(object):
             evaluated_pids = []
             total_batch_num = len(test_dl)
             for index, batch in enumerate(tqdm(test_dl)):
-                if isinstance(batch, list):
+                if isinstance(batch, list | tuple):
                     print("len batch: ", len(batch))
-                    batch = batch[0]
+                    batch = batch[0][0]
 
                 batch = to_device(batch, self.device)
-                pid = batch["basic"]["pdb_id"]
+                pid = batch.get("sample_name", batch.get("basic", {}).get("pdb_id", f"sample_{index}"))
 
                 if index + 1 == total_batch_num and DIST_WRAPPER.world_size > 1:
                     # Gather all pids across ranks for avoiding duplicated evaluations when drop_last = False
@@ -566,6 +572,14 @@ class AF3Trainer(object):
                         {k: v for k, v in lddt_metrics.items() if "diff" not in k}
                     )
                     simple_metrics.update(loss_dict)
+
+                    # TM-score metrics
+                    if self.use_tm_score:
+                        tm_score_dict = self.tm_score_metrics.compute_tm_score(
+                            batch["pred_dict"], batch["label_dict"]
+                        )
+                        tm_score_metrics = self.tm_score_metrics.aggregate_tm_score(tm_score_dict)
+                        simple_metrics.update(tm_score_metrics)
 
                 # Metrics
                 for key, value in simple_metrics.items():
