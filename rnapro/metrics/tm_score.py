@@ -132,7 +132,12 @@ class TMScore(nn.Module):
         d0_sq = d0 ** 2
 
         # Align predicted structure to true structure
-        # This performs optimal rotation and translation
+        # Note: SVD doesn't support bfloat16, so cast to float32 for alignment
+        original_dtype = pred_masked.dtype
+        if original_dtype == torch.bfloat16:
+            pred_masked = pred_masked.float()
+            true_masked = true_masked.float()
+
         aligned_pred, _, _ = align_pred_to_true(
             pred_pose=pred_masked,
             true_pose=true_masked.unsqueeze(0).expand(pred_masked.shape[0], -1, -1),
@@ -140,6 +145,11 @@ class TMScore(nn.Module):
             weight=None,  # Equal weight for all atoms
             allowing_reflection=False,
         )
+
+        # Cast back to original dtype
+        if original_dtype == torch.bfloat16:
+            aligned_pred = aligned_pred.bfloat16()
+            true_masked = true_masked.bfloat16()
 
         # Compute distances between aligned predicted and true coordinates
         # Distance: [N_sample, N_valid]
