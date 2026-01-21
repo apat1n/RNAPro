@@ -70,7 +70,7 @@ def get_dataloaders(
         tuple: A tuple containing the training data loader and a dictionary of testing data loaders.
 
     """
-    temporal_cutoff = "2025-05-09"
+    temporal_cutoff = "2025-10-01"
     crop_size = configs.train_crop_size
     print(f"cropping size is {crop_size}")
     train_dataset = RNADataset(
@@ -94,7 +94,7 @@ def get_dataloaders(
         msa_dir=configs.msa_dir,
         use_cluster=configs.use_cluster,
         num_templates=configs.num_templates,
-        temporal_cutoff='2025-02-01',
+        temporal_cutoff=temporal_cutoff,
         mode='test',
     )
 
