@@ -567,7 +567,7 @@ class RNADataset(Dataset):
         # Get template data for this sample
         template_data = self.templates_dict.get(sample_name, [])
         print('#'*20, 'before crop', len(seq))
-        if len(seq) > self.crop_size and self.crop_size > 0:
+        if len(seq) > self.crop_size > 0:
             # Determine crop boundaries
             crop_start = np.random.randint(0, len(seq) - self.crop_size + 1)
             crop_end = crop_start + self.crop_size

@@ -71,12 +71,13 @@ def get_dataloaders(
 
     """
     temporal_cutoff = "2025-10-01"
-    crop_size = configs.train_crop_size
-    print(f"cropping size is {crop_size}")
+    train_crop_size = configs.train_crop_size
+    eval_crop_size = configs.get('eval_crop_size', train_crop_size)
+    print(f"{train_crop_size = }, {eval_crop_size = }")
     train_dataset = RNADataset(
         data_dir=configs.data.train_sets[0],
         use_msa=configs.use_msa,
-        crop_size = crop_size,
+        crop_size = train_crop_size,
         use_template=configs.use_template,
         msa_dir=configs.msa_dir,
         use_cluster=configs.use_cluster,
@@ -89,7 +90,7 @@ def get_dataloaders(
     test_dataset = RNADataset(
         data_dir=configs.data.train_sets[0],
         use_msa=configs.use_msa,
-        crop_size = crop_size,
+        crop_size = eval_crop_size,
         use_template=configs.use_template,
         msa_dir=configs.msa_dir,
         use_cluster=configs.use_cluster,
