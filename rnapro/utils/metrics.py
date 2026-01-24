@@ -18,12 +18,12 @@ import torch
 from rnapro.utils.distributed import gather_and_merge
 
 common_aggregator = {
-    "avg": lambda x: np.mean(x),
-    "median": lambda x: np.median(x),
-    "pct90": lambda x: np.percentile(x, 90),
-    "pct99": lambda x: np.percentile(x, 99),
-    "max": lambda x: np.max(x),
-    "min": lambda x: np.min(x),
+    "avg": lambda x: np.nanmean(x),
+    "median": lambda x: np.nanmedian(x),
+    "pct90": lambda x: np.nanpercentile(x, 90),
+    "pct99": lambda x: np.nanpercentile(x, 99),
+    "max": lambda x: np.nanmax(x),
+    "min": lambda x: np.nanmin(x),
 }
 
 
