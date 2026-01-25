@@ -211,7 +211,7 @@ class RNADataset(Dataset):
 
         templates_csv_fpath = Path(os.path.join(data_dir, 'train_templates.v2.1.csv'))
         templates_pt_fpath = Path(os.path.join(data_dir, 'template_features.pt'))
-        if templates_pt_fpath:
+        if templates_pt_fpath.exists():
             self.template_features = torch.load(templates_pt_fpath.as_uri(), weights_only=False)
             self.template_features_names = list(self.template_features.keys())
         else:
