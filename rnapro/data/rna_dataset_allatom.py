@@ -208,10 +208,16 @@ class RNADataset(Dataset):
         self.use_template = use_template
         sequences_csv_fpath = Path(os.path.join(data_dir, 'train_sequences.v2.1.csv'))
         coords_csv_fpath = Path(os.path.join(data_dir, 'train_allatom.v2.1.csv'))
-        templates_csv_fpath = Path(os.path.join(data_dir, 'train_templates.v2.1.csv'))
-        self.template_features = torch.load(os.path.join(data_dir, 'template_features.pt'), weights_only=False)
 
-        self.template_features_names = list(self.template_features.keys())
+        templates_csv_fpath = Path(os.path.join(data_dir, 'train_templates.v2.1.csv'))
+        templates_pt_fpath = Path(os.path.join(data_dir, 'template_features.pt'))
+        if templates_pt_fpath:
+            self.template_features = torch.load(templates_pt_fpath.as_uri(), weights_only=False)
+            self.template_features_names = list(self.template_features.keys())
+        else:
+            self.template_features = None
+            self.template_features_names = []
+
         self.inference_mode = mode == 'test'
         # Validate inputs
         # Check file existence
