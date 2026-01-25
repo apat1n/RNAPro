@@ -69,6 +69,61 @@ os.environ["WANDB_CONSOLE"] = "off"
 torch.serialization.add_safe_globals([Namespace])
 
 
+def compute_gradient_norms(model, detailed=False) -> dict:
+    """
+    Compute gradient norms for different parts of the model.
+
+    Args:
+        model: The model to compute gradients for
+        detailed: If True, return per-module gradients
+
+    Returns:
+        dict: Dictionary of gradient norms
+    """
+    grad_dict = {}
+
+    # Overall gradient norm
+    total_norm = 0.0
+    num_params = 0
+    for p in model.parameters():
+        if p.grad is not None:
+            param_norm = p.grad.data.norm(2)
+            total_norm += param_norm.item() ** 2
+            num_params += 1
+    total_norm = total_norm ** 0.5
+    grad_dict["grad_norm/total"] = total_norm
+    grad_dict["grad_norm/num_params_with_grad"] = num_params
+
+    if detailed:
+        # Per-module gradient norms
+        module_groups = {
+            "input_embedder": "input_embedder",
+            "template_embedder": "template_embedder",
+            "msa_module": "msa_module",
+            "pairformer": "pairformer_stack",
+            "diffusion": "diffusion_module",
+            "confidence": "confidence_head",
+            "distogram": "distogram_head",
+        }
+
+        for group_name, module_name in module_groups.items():
+            if hasattr(model, module_name):
+                module = getattr(model, module_name)
+                module_norm = 0.0
+                module_params = 0
+                for p in module.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        module_norm += param_norm.item() ** 2
+                        module_params += 1
+                if module_params > 0:
+                    module_norm = module_norm ** 0.5
+                    grad_dict[f"grad_norm/{group_name}"] = module_norm
+                    grad_dict[f"grad_norm/{group_name}_params"] = module_params
+
+    return grad_dict
+
+
 class AF3Trainer(object):
     def __init__(self, configs):
         self.configs = configs
@@ -636,14 +691,29 @@ class AF3Trainer(object):
         scaler.scale(loss / self.iters_to_accumulate).backward()
 
         # For simplicity, the global training step is used
+        grad_norms = {}
         if (self.global_step + 1) % self.iters_to_accumulate == 0:
             self.print(
                 f"self.step {self.step}, self.iters_to_accumulate: {self.iters_to_accumulate}"
             )
             # Unscales the gradients of optimizer's assigned parameters in-place
             scaler.unscale_(self.optimizer)
+
+            # Compute gradient norms (before clipping)
+            model_for_grad = self.model.module if isinstance(self.model, DDP) else self.model
+            grad_norms = compute_gradient_norms(
+                model_for_grad,
+                detailed=self.configs.get('log_detailed_grads', False)
+            )
+
             # Do grad clip only
             self.update()
+
+            # Compute gradient norms after clipping
+            if self.configs.grad_clip_norm > 0:
+                grad_norms_clipped = compute_gradient_norms(model_for_grad, detailed=False)
+                grad_norms["grad_norm/total_after_clip"] = grad_norms_clipped["grad_norm/total"]
+
             scaler.step(self.optimizer)
             scaler.update()
             self.optimizer.zero_grad(set_to_none=True)
@@ -652,6 +722,11 @@ class AF3Trainer(object):
             if "loss" not in key:
                 continue
             self.train_metric_wrapper.add(key, value, namespace="train")
+
+        # Add gradient norms to metrics (only on update steps)
+        if (self.global_step + 1) % self.iters_to_accumulate == 0:
+            for key, value in grad_norms.items():
+                self.train_metric_wrapper.add(key, value, namespace="train")
         torch.cuda.empty_cache()
 
     def progress_bar(self, desc: str = ""):

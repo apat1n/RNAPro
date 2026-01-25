@@ -99,6 +99,7 @@ optim_configs = {
     "min_lr_ratio": 0.1,
     "decay_every_n_steps": 50000,
     "grad_clip_norm": 10,
+    "log_detailed_grads": False,  # Set to True to log per-module gradient norms
     # Optim - Adam
     "adam": {
         "beta1": 0.9,
