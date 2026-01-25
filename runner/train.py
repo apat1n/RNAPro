@@ -235,7 +235,7 @@ class AF3Trainer(object):
         )
         self.lddt_metrics = LDDTMetrics(self.configs)
         # Initialize TM-score metrics if enabled
-        self.use_tm_score = self.configs.get("use_tm_score", True)  # Default: enabled
+        self.use_tm_score = self.configs.get("use_tm_score", False)  # Default: enabled
         if self.use_tm_score:
             self.tm_score_metrics = TMScoreMetrics(self.configs)
 
