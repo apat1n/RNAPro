@@ -394,7 +394,7 @@ class RNADataset(Dataset):
         df.fillna(INVALID_COORDINATE_VALUE, inplace=True)
         
         # Pre-compute target_ids to avoid string operations in loop
-        df['target_id'] = df['ID'].str.rsplit('_', n=1).str[0]
+        df['target_id'] = df['ID'].str.rsplit('_', n=2).str[0]
         
         # Filter to only valid target IDs early to save processing time
         df = df[df['target_id'].isin(valid_target_ids)]
@@ -458,7 +458,7 @@ class RNADataset(Dataset):
         df.fillna(INVALID_COORDINATE_VALUE, inplace=True)
         
         # Pre-compute target_ids to avoid string operations in loop
-        df['target_id'] = df['ID'].str.rsplit('_', n=1).str[0]
+        df['target_id'] = df['ID'].str.rsplit('_', n=2).str[0]
         
         # Filter to only valid target IDs early to save processing time
         df = df[df['target_id'].isin(valid_target_ids)]
