@@ -406,7 +406,7 @@ class RNADataset(Dataset):
         # Prepare coordinate column names for vectorized extraction
         coord_cols = []
         for atom_name in ATOM_NAMES:
-            coord_cols.extend([f"{atom_name}_x_1", f"{atom_name}_y_1", f"{atom_name}_z_1"])
+            coord_cols.extend([f"{atom_name}_x", f"{atom_name}_y", f"{atom_name}_z"])
         
         # Group by target_id and process efficiently
         coords_dict = {}
