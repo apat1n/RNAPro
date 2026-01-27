@@ -72,6 +72,7 @@ basic_configs = {
     "use_template": "None",
     "use_cluster": 'na',
     "num_templates": 4,
+    "use_tm_score": False,
 }
 data_configs = {
     # Data
