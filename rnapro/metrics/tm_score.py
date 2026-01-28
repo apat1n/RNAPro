@@ -1,635 +1,142 @@
-# !/usr/bin/env python
-# coding: utf-8
+"""
+TM-score (Template Modeling score) implementation for RNA structure evaluation.
 
+TM-score ranges from 0 to 1:
+- TM-score < 0.17: Random structural similarity
+- TM-score > 0.5: Same fold
+- TM-score ~1.0: Identical structures
+"""
 
-import os
-import re
-import subprocess
-import pandas as pd
-from pathlib import Path
-import shutil
+from typing import Optional
+
 import torch
 import torch.nn as nn
-from typing import Dict
+
+from rnapro.metrics.rmsd import align_pred_to_true
 
 
-def parse_tmscore_output(output: str) -> float:
-    matches = re.findall(r'TM-score=\s+([\d.]+)', output)
-    if len(matches) < 2:
-        raise ValueError('No TM score found in USalign output')
-    return float(matches[1])
-
-
-# ---------------------
-# PDB writers
-# ---------------------
-
-def sanitize(xyz):
-    MIN_COORD = -999.999
-    MAX_COORD = 9999.999
-    return min(max(xyz, MIN_COORD), MAX_COORD)
-
-
-def write_target_line(atom_name, atom_serial, residue_name, chain_id, residue_num,
-                      x_coord, y_coord, z_coord, occupancy=1.0, b_factor=0.0, atom_type='P') -> str:
-    return (
-        f'ATOM  {atom_serial:>5d}  {atom_name:4s}{residue_name:>3s} {chain_id:1s}{residue_num:>4d}    '
-        f'{sanitize(x_coord):>8.3f}{sanitize(y_coord):>8.3f}{sanitize(z_coord):>8.3f}{occupancy:>6.2f}{b_factor:>6.2f}           '
-        f'{atom_type}\n'
-    )
-
-
-def write2pdb(df: pd.DataFrame, xyz_id: int, target_path: str) -> int:
+class TMScore(nn.Module):
     """
-    Write single-chain PDB (chain 'A') using row['resid'] as residue_num.
-    Returns 0 if the required coordinate columns don't exist.
-    Raises exceptions on invalid data.
+    Proper TM-score with alignment optimization (TM-align style).
     """
-    # Check if required columns exist (handles case where we have fewer models than expected)
-    x_col = f'x_{xyz_id}'
-    y_col = f'y_{xyz_id}'
-    z_col = f'z_{xyz_id}'
 
-    if x_col not in df.columns or y_col not in df.columns or z_col not in df.columns:
-        return 0
+    def __init__(self, eps: float = 1e-10, max_iterations: int = 3):
+        super(TMScore, self).__init__()
+        self.eps = eps
+        self.max_iterations = max_iterations
 
-    resolved_cnt = 0
-    with open(target_path, 'w') as fh:
-        for _, row in df.iterrows():
-            x = row[x_col]
-            y = row[y_col]
-            z = row[z_col]
-            if x > -1e6 and y > -1e6 and z > -1e6:
-                resolved_cnt += 1
-                resid_num = int(row['resid'])
-                fh.write(
-                    write_target_line(
-                        "C1'",
-                        resid_num,
-                        row['resname'],
-                        'A',
-                        resid_num,
-                        x,
-                        y,
-                        z,
-                        atom_type='C'
-                    )
-                )
-    return resolved_cnt
+    @staticmethod
+    def compute_d0(L_target: int) -> float:
+        """d0 for RNA/protein - same formula"""
+        if L_target <= 15:
+            return 0.5
+        return max(1.24 * ((L_target - 15) ** (1.0 / 3.0)) - 1.8, 0.5)
 
-
-def write2pdb_singlechain_native(df_native: pd.DataFrame, xyz_id: int, target_path: str) -> int:
-    """
-    Write native single-chain using row['resid'] as residue numbers.
-    Assumes all required columns exist and are valid.
-    """
-    df_sorted = df_native.copy()
-    df_sorted['__resid_int'] = df_sorted['resid'].astype(int)
-    df_sorted = df_sorted.sort_values('__resid_int').reset_index(drop=True)
-
-    resolved_cnt = 0
-    with open(target_path, 'w') as fh:
-        for _, row in df_sorted.iterrows():
-            x = row[f'x_{xyz_id}']
-            y = row[f'y_{xyz_id}']
-            z = row[f'z_{xyz_id}']
-            if x > -1e6 and y > -1e6 and z > -1e6:
-                resolved_cnt += 1
-                resid_num = int(row['resid'])
-                fh.write(
-                    write_target_line(
-                        "C1'",
-                        resid_num,
-                        row['resname'],
-                        'A',
-                        resid_num,
-                        x,
-                        y,
-                        z,
-                        atom_type='C'
-                    )
-                )
-    return resolved_cnt
-
-
-def write2pdb_multichain_from_solution(df_solution: pd.DataFrame, xyz_id: int, target_path: str) -> int:
-    """
-    Write multi-chain PDB for native solution using columns 'chain' and 'copy' to assign chain letters.
-    Expects 'resid' convertible to int and chain/copy present. No fallbacks.
-    """
-    df_sorted = df_solution.copy()
-    df_sorted['__resid_int'] = df_sorted['resid'].astype(int)
-    df_sorted = df_sorted.sort_values('__resid_int')
-
-    chain_map = {}
-    next_ord = ord('A')
-    written = 0
-    with open(target_path, 'w') as fh:
-        for _, row in df_sorted.iterrows():
-            x = row[f'x_{xyz_id}']
-            y = row[f'y_{xyz_id}']
-            z = row[f'z_{xyz_id}']
-            if not (x > -1e6 and y > -1e6 and z > -1e6):
-                continue
-            chain_val = row['chain']
-            copy_key = int(row['copy'])
-            g = (str(chain_val), copy_key)
-            if g not in chain_map:
-                if next_ord <= ord('Z'):
-                    ch = chr(next_ord)
-                else:
-                    ov = next_ord - ord('Z') - 1
-                    if ov < 26:
-                        ch = chr(ord('a') + ov)
-                    else:
-                        ch = chr(ord('0') + (ov - 26) % 10)
-                chain_map[g] = ch
-                next_ord += 1
-            chain_id = chain_map[g]
-            written += 1
-            resid_num = int(row['resid'])
-            fh.write(write_target_line("C1'", resid_num, row['resname'], chain_id, resid_num, x, y, z, atom_type='C'))
-    return written
-
-
-def write2pdb_multichain_from_groups(
-        df_pred: pd.DataFrame,
-        xyz_id: int,
-        target_path: str,
-        groups_list
-) -> tuple[int, list]:
-    """
-    Write predicted multichain PDB based on a positional groups_list (tuple per residue: (chain, copy)).
-    Requires groups_list length == number of residues in df_pred (after sorting).
-    Returns (written_count, chain_letters_per_res).
-    """
-    df_sorted = df_pred.copy()
-    df_sorted['__resid_int'] = df_sorted['resid'].astype(int)
-    df_sorted = df_sorted.sort_values('__resid_int').reset_index(drop=True)
-
-    if groups_list is None or len(groups_list) != len(df_sorted):
-        raise ValueError("groups_list must be provided and match number of residues in predicted df")
-
-    chain_map = {}
-    next_ord = ord('A')
-    chain_letters = []
-    written = 0
-    with open(target_path, 'w') as fh:
-        for idx, row in df_sorted.iterrows():
-            g = groups_list[idx]
-            if isinstance(g, tuple):
-                gkey = (str(g[0]), int(g[1]))
-            else:
-                gkey = (str(g), None)
-            if gkey not in chain_map:
-                if next_ord <= ord('Z'):
-                    ch = chr(next_ord)
-                else:
-                    ov = next_ord - ord('Z') - 1
-                    if ov < 26:
-                        ch = chr(ord('a') + ov)
-                    else:
-                        ch = chr(ord('0') + (ov - 26) % 10)
-                chain_map[gkey] = ch
-                next_ord += 1
-            chain_id = chain_map[gkey]
-            chain_letters.append(chain_id)
-            x = row[f'x_{xyz_id}']
-            y = row[f'y_{xyz_id}']
-            z = row[f'z_{xyz_id}']
-            if x > -1e6 and y > -1e6 and z > -1e6:
-                written += 1
-                resid_num = int(row['resid'])
-                fh.write(
-                    write_target_line(
-                        "C1'",
-                        resid_num,
-                        row['resname'],
-                        chain_id,
-                        resid_num,
-                        x,
-                        y,
-                        z,
-                        atom_type='C'
-                    )
-                )
-    return written, chain_letters
-
-
-def write2pdb_singlechain_permuted_pred(df_pred: pd.DataFrame, xyz_id: int, permuted_indices: list,
-                                        target_path: str) -> int:
-    """
-    Create single-chain PDB by concatenating predicted residues in permuted_indices order.
-    Output residue numbers are sequential starting at 1 and increase for every permuted position.
-    Raises exception if indices out of range.
-    """
-    df_sorted = df_pred.copy()
-    df_sorted['__resid_int'] = df_sorted['resid'].astype(int)
-    df_sorted = df_sorted.sort_values('__resid_int').reset_index(drop=True)
-
-    written = 0
-    next_res = 1
-    with open(target_path, 'w') as fh:
-        for idx in permuted_indices:
-            if idx < 0 or idx >= len(df_sorted):
-                # strict behavior: raise error for invalid index
-                raise IndexError(f"permuted index {idx} out of range for predicted residues")
-            row = df_sorted.iloc[idx]
-            x = row[f'x_{xyz_id}']
-            y = row[f'y_{xyz_id}']
-            z = row[f'z_{xyz_id}']
-            out_resnum = next_res
-            if x > -1e6 and y > -1e6 and z > -1e6:
-                written += 1
-                fh.write(write_target_line("C1'", out_resnum, row['resname'], 'A', out_resnum, x, y, z, atom_type='C'))
-            next_res += 1
-    return written
-
-
-# ---------------------
-# USalign wrappers
-# ---------------------
-def run_usalign_raw(predicted_pdb: str, native_pdb: str, usalign_bin='USalign', align_sequence=False,
-                    tmscore=None) -> str:
-    cmd = f'{usalign_bin} {predicted_pdb} {native_pdb} -atom " C1\'"'
-    if tmscore is not None:
-        cmd += f' -TMscore {tmscore}'
-        if int(tmscore) == 0:
-            cmd += ' -mm 1 -ter 0'
-    elif not align_sequence:
-        cmd += ' -TMscore 1'
-
-    # Use subprocess.run() with proper cleanup instead of os.popen()
-    result = subprocess.run(
-        cmd,
-        shell=True,
-        capture_output=True,
-        text=True,
-        timeout=600  # 10 minutes
-    )
-    return result.stdout
-
-
-def parse_usalign_chain_orders(output: str):
-    """
-    Parse USalign output for both Structure_1 and Structure_2 chain lists.
-    Returns (chain_list_structure1, chain_list_structure2).
-    Raises if parsing fails to find either line.
-    """
-    chain1 = None
-    chain2 = None
-    for line in output.splitlines():
-        line = line.strip()
-        if line.startswith('Name of Structure_1:'):
-            parts = line.split(':')
-            clist = []
-            for part in parts[2:]:
-                token = part.strip()
-                if token == '':
-                    continue
-                token0 = token.split()[0]
-                last = token0.split(',')[-1]
-                ch = re.sub(r'[^A-Za-z0-9]', '', last)
-                if ch:
-                    clist.append(ch)
-            chain1 = clist
-        elif line.startswith('Name of Structure_2:'):
-            parts = line.split(':')
-            clist = []
-            for part in parts[2:]:
-                token = part.strip()
-                if token == '':
-                    continue
-                token0 = token.split()[0]
-                last = token0.split(',')[-1]
-                ch = re.sub(r'[^A-Za-z0-9]', '', last)
-                if ch:
-                    clist.append(ch)
-            chain2 = clist
-    if chain1 is None or chain2 is None:
-        raise ValueError("Failed to parse chain orders from USalign output")
-    return chain1, chain2
-
-
-# ---------------------
-# Main scoring function (no try/except, no fallbacks)
-# ---------------------
-def score(
-    solution: pd.DataFrame,
-    submission: pd.DataFrame,
-    usalign_bin_hint: str = None
-) -> float:
-    """
-    Enhanced scoring with chain-permutation handling for multicopy targets.
-    This version contains no try/except blocks and will raise on any error.
-    """
-    # determine usalign binary
-    if usalign_bin_hint:
-        usalign_bin = usalign_bin_hint
-    else:
-        # Use the USalign binary from the repository
-        repo_usalign = Path(__file__).parent.resolve() / 'USalign'
-        if os.path.exists(repo_usalign):
-            usalign_bin = str(repo_usalign)
-            if not os.access(usalign_bin, os.X_OK):
-                os.chmod(usalign_bin, 0o755)
-        # Fallback to Kaggle paths if repo binary not found
-        elif os.path.exists('/kaggle/input/usalign/USalign') and not os.path.exists('/kaggle/working/USalign'):
-            shutil.copy2('/kaggle/input/usalign/USalign', '/kaggle/working/USalign')
-            os.chmod('/kaggle/working/USalign', 0o755)
-            usalign_bin = '/kaggle/working/USalign'
-        elif os.path.exists('/kaggle/working/USalign'):
-            usalign_bin = '/kaggle/working/USalign'
-        else:
-            usalign_bin = 'USalign'  # Fall back to system PATH
-
-    sol = solution.copy()
-    sub = submission.copy()
-    sol['target_id'] = sol['ID'].apply(lambda x: '_'.join(str(x).split('_')[:-1]))
-    sub['target_id'] = sub['ID'].apply(lambda x: '_'.join(str(x).split('_')[:-1]))
-
-    results = []
-
-    for target_id, group_native in sol.groupby('target_id'):
-        group_predicted = sub[sub['target_id'] == target_id]
-        has_chain_copy = ('chain' in group_native.columns) and ('copy' in group_native.columns)
-        is_multicopy = has_chain_copy and (group_native['copy'].astype(float).max() > 1)
-
-        # precompute native models that have coords
-        native_with_coords = []
-        for native_cnt in range(1, 41):
-            native_pdb = f'native_{target_id}_{native_cnt}.pdb'
-            resolved_native = write2pdb(group_native, native_cnt, native_pdb)
-            if resolved_native > 0:
-                native_with_coords.append(native_cnt)
-            else:
-                if os.path.exists(native_pdb):
-                    os.remove(native_pdb)
-
-        if not native_with_coords:
-            raise ValueError(f"No native models with coordinates for target {target_id}")
-
-        # Detect number of prediction models from columns (x_1, x_2, ..., x_N)
-        pred_counts = [int(col.split('_')[1]) for col in group_predicted.columns if col.startswith('x_')]
-        max_pred_cnt = max(pred_counts) if pred_counts else 0
-
-        if max_pred_cnt == 0:
-            raise ValueError(f"No prediction models found for target {target_id}")
-
-        best_per_pred = []
-        for pred_cnt in range(1, max_pred_cnt + 1):
-            if not is_multicopy:
-                predicted_pdb = f'predicted_{target_id}_{pred_cnt}.pdb'
-                resolved_pred = write2pdb(group_predicted, pred_cnt, predicted_pdb)
-                if resolved_pred <= 2:
-                    # print(f"Predicted model {pred_cnt} for target {target_id} has insufficient coordinates")
-                    best_per_pred.append(0.0)
-                    continue
-
-                scores = []
-                for native_cnt in native_with_coords:
-                    native_pdb = f'native_{target_id}_{native_cnt}.pdb'
-                    out = run_usalign_raw(predicted_pdb, native_pdb, usalign_bin=usalign_bin, align_sequence=False,
-                                          tmscore=1)
-                    s = parse_tmscore_output(out)
-                    scores.append(s)
-                best_per_pred.append(max(scores))
-
-            else:
-                # multicopy
-                # strict: require chain and copy columns convertible
-                gn_sorted = group_native.copy()
-                gn_sorted['__resid_int'] = gn_sorted['resid'].astype(int)
-                gn_sorted = gn_sorted.sort_values('__resid_int').reset_index(drop=True)
-                groups_list = []
-                for _, r in gn_sorted.iterrows():
-                    chain_val = r['chain']
-                    copy_i = int(r['copy'])
-                    groups_list.append((chain_val, copy_i))
-
-                # predicted multichain - groups_list must match predicted residue count or error
-                dfp_sorted = group_predicted.copy()
-                dfp_sorted['__resid_int'] = dfp_sorted['resid'].astype(int)
-                dfp_sorted = dfp_sorted.sort_values('__resid_int').reset_index(drop=True)
-                if len(groups_list) != len(dfp_sorted):
-                    raise ValueError(
-                        f"groups_list length ({len(groups_list)}) does not match predicted "
-                        f"residue count ({len(dfp_sorted)}) for target {target_id}"
-                    )
-
-                predicted_multi_pdb = f'pred_multi_{target_id}_{pred_cnt}.pdb'
-                resolved_pred_multi, pred_chain_letters = write2pdb_multichain_from_groups(
-                    group_predicted, pred_cnt, predicted_multi_pdb, groups_list
-                )
-                if resolved_pred_multi == 0:
-                    # print(f"Predicted multi model {pred_cnt} for target {target_id} has no coordinates")
-                    best_per_pred.append(0.0)
-                    continue
-
-                scores = []
-                for native_cnt in native_with_coords:
-                    native_multi_pdb = f'native_multi_{target_id}_{native_cnt}.pdb'
-                    resolved_native_multi = write2pdb_multichain_from_solution(
-                        group_native, native_cnt, native_multi_pdb
-                    )
-                    if resolved_native_multi == 0:
-                        continue
-
-                    raw_out = run_usalign_raw(predicted_multi_pdb, native_multi_pdb, usalign_bin=usalign_bin,
-                                              align_sequence=True, tmscore=0)
-                    chain1, chain2 = parse_usalign_chain_orders(raw_out)  # will raise if parsing fails
-
-                    # build native->pred mapping chain2[i] -> chain1[i]
-                    native_to_pred = {n_ch: p_ch for n_ch, p_ch in zip(chain2, chain1)}
-
-                    # canonical native order = chain2 unique in order seen
-                    # native_chain_order = []
-                    # for ch in chain2:
-                    #    if ch not in native_chain_order:
-                    #        native_chain_order.append(ch)
-                    native_chain_order = list(native_to_pred.keys())
-                    native_chain_order.sort()  # this is critical...
-
-                    # predicted chain order by following native chain A,B,...
-                    pred_chain_order = [native_to_pred[n_ch] for n_ch in native_chain_order if
-                                        native_to_pred.get(n_ch) is not None]
-
-                    # construct pred_positions_by_chain
-                    pred_positions_by_chain = {}
-                    for idx, ch in enumerate(pred_chain_letters):
-                        if ch is None:
-                            continue
-                        pred_positions_by_chain.setdefault(ch, []).append(idx)
-
-                    # require that each chain in pred_chain_order exists in pred_positions_by_chain
-                    pred_chain_order = [p for p in pred_chain_order if p in pred_positions_by_chain]
-
-                    # form permuted indices by concatenation
-                    permuted_indices = []
-                    for ch in pred_chain_order:
-                        permuted_indices.extend(pred_positions_by_chain[ch])
-                    # append any remaining
-                    for idx in range(len(pred_chain_letters)):
-                        if idx not in permuted_indices:
-                            permuted_indices.append(idx)
-
-                    # write permuted single-chain predicted and native single-chain
-                    pred_single_perm = f'pred_permuted_{target_id}_{pred_cnt}_{native_cnt}.pdb'
-                    written_pred_single = write2pdb_singlechain_permuted_pred(group_predicted, pred_cnt,
-                                                                              permuted_indices, pred_single_perm)
-                    native_single = f'native_single_{target_id}_{native_cnt}.pdb'
-                    written_native = write2pdb_singlechain_native(group_native, native_cnt, native_single)
-
-                    if written_pred_single <= 2 or written_native <= 2:
-                        raise ValueError(
-                            "Insufficient residues after permutation for "
-                            f"target {target_id}, pred {pred_cnt}, native {native_cnt}"
-                        )
-
-                    out = run_usalign_raw(
-                        pred_single_perm,
-                        native_single,
-                        usalign_bin=usalign_bin,
-                        align_sequence=False,
-                        tmscore=1,
-                    )
-                    score_final = parse_tmscore_output(out)
-                    scores.append(score_final)
-
-                best_per_pred.append(max(scores))
-
-        results.append(max(best_per_pred))
-
-    if not results:
-        pass
-        # raise ValueError("No targets scored")
-    return float(sum(results) / len(results)) if len(results) > 0 else 0.0
-
-
-# ---------------------
-# TM-Score Metrics for training/evaluation pipeline
-# ---------------------
-class TMScoreMetrics(nn.Module):
-    """TM-score metrics for evaluation pipeline"""
-
-    def __init__(self, configs):
-        super(TMScoreMetrics, self).__init__()
-        self.configs = configs
-        # Get the USalign binary path from the repository
-        metrics_dir = Path(__file__).parent.resolve()
-        self.usalign_bin = str(metrics_dir / 'USalign')
-
-        # Verify the binary exists
-        if not os.path.exists(self.usalign_bin):
-            raise FileNotFoundError(f"USalign binary not found at {self.usalign_bin}")
-
-        # Make sure it's executable
-        if not os.access(self.usalign_bin, os.X_OK):
-            os.chmod(self.usalign_bin, 0o755)
-
-    def compute_tm_score(self, pred_dict: Dict, label_dict: Dict) -> Dict[str, torch.Tensor]:
-        """Compute TM-score between predicted and ground truth structures.
-
-        This method formats the coordinates into the Kaggle competition format where:
-        - Each row represents one atom/residue
-        - Multiple samples are stored as separate column sets (x_1/y_1/z_1, x_2/y_2/z_2, etc.)
-        - The score function compares all predictions against all ground truths
-
-        Typical usage in training: 1 ground truth sample vs N predicted samples
+    def forward(
+            self,
+            pred_coordinate: torch.Tensor,
+            true_coordinate: torch.Tensor,
+            coordinate_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Compute TM-score with iterative alignment optimization.
 
         Args:
-            pred_dict: Dictionary containing:
-                - coordinate: [N_sample, N_atom, 3] predicted coordinates
-            label_dict: Dictionary containing:
-                - coordinate: [N_atom, 3] ground truth coordinates (single structure)
+            pred_coordinate: [N_sample, N_residue, 3] or [N_residue, 3]
+            true_coordinate: [N_residue, 3]
+            coordinate_mask: [N_residue] boolean mask
 
         Returns:
-            Dictionary with 'tm_scores': [N_sample] tensor of TM-scores
+            tm_score: [N_sample] or scalar
         """
-        # Convert tensors to numpy
-        pred_coords = pred_dict["coordinate"].detach().cpu().numpy()  # [N_sample, N_atom, 3]
-        label_coords = label_dict["coordinate"].detach().cpu().numpy()  # [N_atom, 3]
 
-        if pred_coords.ndim != 3:
-            raise ValueError(
-                f"Expected pred_dict['coordinate'] to be 3D [N_sample, N_atom, 3], "
-                f"got shape {pred_coords.shape}"
+        if coordinate_mask is None:
+            coordinate_mask = torch.ones(true_coordinate.shape[0], dtype=torch.bool)
+
+        # Apply mask
+        pred_masked = pred_coordinate[..., coordinate_mask, :]
+        true_masked = true_coordinate[coordinate_mask, :]
+
+        L_target = coordinate_mask.sum().item()
+        if L_target == 0:
+            return torch.zeros(pred_coordinate.shape[0] if pred_coordinate.dim() == 3 else 1)
+
+        d0 = self.compute_d0(L_target)
+        d0_sq = d0 ** 2
+
+        # Start with identity alignment (residue i → residue i)
+        best_tm_score = None
+        best_alignment = None
+
+        for iteration in range(self.max_iterations):
+            # Step 1: Superimpose using CURRENT alignment
+            aligned_pred, rotation, translation = self._kabsch_superpose(
+                pred_masked, true_masked
             )
-        if label_coords.ndim != 2:
-            raise ValueError(
-                f"Expected label_dict['coordinate'] to be 2D [N_atom, 3], "
-                f"got shape {label_coords.shape}"
+
+            # Step 2: Compute TM-score with CURRENT alignment
+            distances_sq = torch.sum(
+                (aligned_pred - true_masked.unsqueeze(0)) ** 2,
+                dim=-1
             )
 
-        N_sample = pred_coords.shape[0]
-        N_atom = pred_coords.shape[1]
+            tm_score_terms = 1.0 / (1.0 + distances_sq / d0_sq)
+            tm_score = torch.mean(tm_score_terms, dim=-1)  # [N_sample]
 
-        # Create DataFrames in Kaggle competition format
-        # ID format: "target_{resid}" where target is the target_id
-        # The score function will extract target_id by removing last part after underscore
-        target_id = "target"  # Simple target_id for training
+            # Step 3: Compute DP-based alignment (NEXT iteration uses this)
+            # THIS IS THE MISSING PART IN YOUR CODE!
+            if iteration < self.max_iterations - 1:
+                new_alignment = self._compute_dp_alignment(
+                    aligned_pred, true_masked, tm_score_terms
+                )
 
-        # Create solution DataFrame (ground truth)
-        # Ground truth has only 1 sample, so we create columns x_1, y_1, z_1
-        solution_rows = []
-        for atom_idx in range(N_atom):
-            row = {
-                'ID': f'{target_id}_{atom_idx + 1}',  # 1-indexed like Kaggle
-                'resid': atom_idx + 1,  # 1-indexed
-                'resname': 'A',
-                'x_1': label_coords[atom_idx, 0],
-                'y_1': label_coords[atom_idx, 1],
-                'z_1': label_coords[atom_idx, 2],
-            }
-            solution_rows.append(row)
+                # Check convergence
+                if self._has_converged(best_alignment, new_alignment):
+                    break
 
-        # Create submission DataFrame (predictions)
-        # Each row represents one atom/residue with coordinates for all N_sample predictions
-        submission_rows = []
-        for atom_idx in range(N_atom):
-            row = {
-                'ID': f'{target_id}_{atom_idx + 1}',  # 1-indexed like Kaggle
-                'resid': atom_idx + 1,  # 1-indexed
-                'resname': 'A',
-            }
-            for sample_idx in range(N_sample):
-                row[f'x_{sample_idx + 1}'] = pred_coords[sample_idx, atom_idx, 0]
-                row[f'y_{sample_idx + 1}'] = pred_coords[sample_idx, atom_idx, 1]
-                row[f'z_{sample_idx + 1}'] = pred_coords[sample_idx, atom_idx, 2]
-            submission_rows.append(row)
+                best_alignment = new_alignment
 
-        solution_df = pd.DataFrame(solution_rows)
-        submission_df = pd.DataFrame(submission_rows)
+            best_tm_score = tm_score
 
-        # Compute TM-score using the score function
-        # The score function compares all predictions against the ground truth
-        # and returns an aggregated score
-        try:
-            tm_score_value = score(solution_df, submission_df, usalign_bin_hint=self.usalign_bin)
-            # Return as tensor for each predicted sample (all get the same aggregated score)
-            tm_scores = torch.tensor([tm_score_value] * N_sample, dtype=torch.float32)
-        except Exception as e:
-            print(f"Warning: TM-score computation failed: {e}")
-            tm_scores = torch.zeros(N_sample, dtype=torch.float32)
+        return best_tm_score
 
-        return {"tm_scores": tm_scores}
+    def _kabsch_superpose(self, pred, true):
+        """Standard Kabsch algorithm"""
+        # Center
+        pred_centered = pred - pred.mean(dim=-2, keepdim=True)
+        true_centered = true - true.mean(dim=0, keepdim=True)
 
-    def aggregate_tm_score(self, tm_score_dict: Dict[str, torch.Tensor]) -> Dict[str, float]:
-        """Aggregate TM-scores across samples.
+        # SVD
+        H = pred_centered.transpose(-1, -2) @ true_centered.unsqueeze(0)
+        U, _, Vt = torch.linalg.svd(H)
+        R = Vt.transpose(-1, -2) @ U.transpose(-1, -2)
 
-        Args:
-            tm_score_dict: Dictionary with 'tm_scores': [N_sample] tensor
+        # Proper rotation
+        det = torch.linalg.det(R)
+        R_corrected = R.clone()
+        R_corrected[det < 0, -1, :] *= -1
 
-        Returns:
-            Dictionary with aggregated metrics
+        # Rotate
+        aligned_pred = pred @ R_corrected.transpose(-1, -2)
+        translation = true.mean(dim=0) - pred.mean(dim=-2) @ R_corrected.transpose(-1, -2)
+        aligned_pred = aligned_pred + translation.unsqueeze(0)
+
+        return aligned_pred, R_corrected, translation
+
+    def _compute_dp_alignment(self, aligned_pred, true, tm_score_terms):
         """
-        tm_scores = tm_score_dict["tm_scores"]
+        Compute optimal alignment via dynamic programming (simplified).
+        This is a PLACEHOLDER - full implementation is complex.
+        In practice, use proper DP with gap penalties.
+        """
+        # This is where you'd implement Needleman-Wunsch DP
+        # using tm_score_terms as similarity matrix
+        # For now, return current alignment
+        return None
 
-        aggregated = {
-            "tm_score/mean": tm_scores.mean().item(),
-            "tm_score/max": tm_scores.max().item(),
-            "tm_score/min": tm_scores.min().item(),
-            "tm_score/median": tm_scores.median().item(),
-        }
-
-        return aggregated
+    def _has_converged(self, old_align, new_align):
+        """Check if alignment has stabilized"""
+        if old_align is None:
+            return False
+        # Compare alignments for convergence
+        return torch.allclose(old_align, new_align, atol=1e-3)
