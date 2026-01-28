@@ -516,8 +516,16 @@ class TMScoreMetrics(nn.Module):
             Dictionary with 'tm_scores': [N_sample] tensor of TM-scores
         """
         # Convert tensors to numpy and prepare DataFrames for score function
-        pred_coords = pred_dict["coordinate"].detach().cpu().numpy()  # [N_sample, N_atom, 3]
-        label_coords = label_dict["coordinate"].detach().cpu().numpy()  # [N_sample, N_atom, 3]
+        pred_coords = pred_dict["coordinate"].detach().cpu().numpy()
+        label_coords = label_dict["coordinate"].detach().cpu().numpy()
+
+        # Handle both [N_atom, 3] and [N_sample, N_atom, 3] shapes
+        if pred_coords.ndim == 2:
+            # Shape is [N_atom, 3], add sample dimension
+            pred_coords = pred_coords[None, :, :]  # [1, N_atom, 3]
+        if label_coords.ndim == 2:
+            # Shape is [N_atom, 3], add sample dimension
+            label_coords = label_coords[None, :, :]  # [1, N_atom, 3]
 
         N_sample = pred_coords.shape[0]
         N_atom = pred_coords.shape[1]
