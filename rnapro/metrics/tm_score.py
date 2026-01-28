@@ -523,32 +523,34 @@ class TMScoreMetrics(nn.Module):
         N_atom = pred_coords.shape[1]
 
         # Create solution DataFrame (ground truth)
+        # Each row represents one atom/residue with coordinates for all samples
         solution_rows = []
         for atom_idx in range(N_atom):
+            row = {
+                'ID': f'target_{atom_idx}',
+                'resid': atom_idx,
+                'resname': 'A',  # Default residue name
+            }
             for sample_idx in range(N_sample):
-                row = {
-                    'ID': f'target_{atom_idx}_{sample_idx}',
-                    'resid': atom_idx,
-                    'resname': 'A',  # Default residue name
-                    f'x_{sample_idx + 1}': label_coords[sample_idx, atom_idx, 0],
-                    f'y_{sample_idx + 1}': label_coords[sample_idx, atom_idx, 1],
-                    f'z_{sample_idx + 1}': label_coords[sample_idx, atom_idx, 2],
-                }
-                solution_rows.append(row)
+                row[f'x_{sample_idx + 1}'] = label_coords[sample_idx, atom_idx, 0]
+                row[f'y_{sample_idx + 1}'] = label_coords[sample_idx, atom_idx, 1]
+                row[f'z_{sample_idx + 1}'] = label_coords[sample_idx, atom_idx, 2]
+            solution_rows.append(row)
 
         # Create submission DataFrame (predictions)
+        # Each row represents one atom/residue with coordinates for all samples
         submission_rows = []
         for atom_idx in range(N_atom):
+            row = {
+                'ID': f'target_{atom_idx}',
+                'resid': atom_idx,
+                'resname': 'A',
+            }
             for sample_idx in range(N_sample):
-                row = {
-                    'ID': f'target_{atom_idx}_{sample_idx}',
-                    'resid': atom_idx,
-                    'resname': 'A',
-                    f'x_{sample_idx + 1}': pred_coords[sample_idx, atom_idx, 0],
-                    f'y_{sample_idx + 1}': pred_coords[sample_idx, atom_idx, 1],
-                    f'z_{sample_idx + 1}': pred_coords[sample_idx, atom_idx, 2],
-                }
-                submission_rows.append(row)
+                row[f'x_{sample_idx + 1}'] = pred_coords[sample_idx, atom_idx, 0]
+                row[f'y_{sample_idx + 1}'] = pred_coords[sample_idx, atom_idx, 1]
+                row[f'z_{sample_idx + 1}'] = pred_coords[sample_idx, atom_idx, 2]
+            submission_rows.append(row)
 
         solution_df = pd.DataFrame(solution_rows)
         submission_df = pd.DataFrame(submission_rows)
