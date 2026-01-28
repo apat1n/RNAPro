@@ -4,6 +4,7 @@
 
 import os
 import re
+import subprocess
 import pandas as pd
 from pathlib import Path
 import shutil
@@ -257,7 +258,16 @@ def run_usalign_raw(predicted_pdb: str, native_pdb: str, usalign_bin='USalign', 
             cmd += ' -mm 1 -ter 0'
     elif not align_sequence:
         cmd += ' -TMscore 1'
-    return os.popen(cmd).read()
+
+    # Use subprocess.run() with proper cleanup instead of os.popen()
+    result = subprocess.run(
+        cmd,
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=600  # 10 minutes
+    )
+    return result.stdout
 
 
 def parse_usalign_chain_orders(output: str):
