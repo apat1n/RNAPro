@@ -33,10 +33,10 @@ class TMScore(nn.Module):
         return max(1.24 * ((L_target - 15) ** (1.0 / 3.0)) - 1.8, 0.5)
 
     def forward(
-            self,
-            pred_coordinate: torch.Tensor,
-            true_coordinate: torch.Tensor,
-            coordinate_mask: Optional[torch.Tensor] = None,
+        self,
+        pred_coordinate: torch.Tensor,
+        true_coordinate: torch.Tensor,
+        coordinate_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Compute TM-score with iterative alignment optimization.
@@ -140,3 +140,64 @@ class TMScore(nn.Module):
             return False
         # Compare alignments for convergence
         return torch.allclose(old_align, new_align, atol=1e-3)
+
+
+class TMScoreMetrics(nn.Module):
+    """
+    TM-score metrics wrapper compatible with existing evaluation pipeline.
+
+    Computes TM-score for multiple samples and aggregates results.
+    """
+
+    def __init__(self, configs):
+        super(TMScoreMetrics, self).__init__()
+        self.eps = configs.metrics.get("tm_score", {}).get("eps", 1e-10)
+        self.configs = configs
+        self.tm_score_base = TMScore(eps=self.eps)
+
+    def compute_tm_score(self, pred_dict: dict, label_dict: dict) -> dict:
+        """
+        Compute TM-score for all samples.
+
+        Args:
+            pred_dict: Dictionary containing:
+                - coordinate: [N_sample, N_atom, 3]
+            label_dict: Dictionary containing:
+                - coordinate: [N_atom, 3]
+                - coordinate_mask: [N_atom]
+
+        Returns:
+            Dictionary with:
+                - complex: [N_sample] TM-scores for each sample
+        """
+        tm_score = self.tm_score_base.forward(
+            pred_coordinate=pred_dict["coordinate"],
+            true_coordinate=label_dict["coordinate"],
+            coordinate_mask=label_dict["coordinate_mask"],
+        )
+
+        return {"complex": tm_score}
+
+    def aggregate_tm_score(self, tm_score_dict: dict) -> dict:
+        """
+        Aggregate TM-scores across samples.
+
+        Args:
+            tm_score_dict: Dictionary with "complex" key containing [N_sample] scores.
+
+        Returns:
+            Dictionary with aggregated metrics (best, worst, mean, median).
+        """
+        tm_scores = tm_score_dict["complex"]  # [N_sample]
+        N_sample = tm_scores.shape[0]
+        median_index = N_sample // 2
+
+        aggregated = {
+            "tm_score/complex/best": tm_scores.max(),
+            "tm_score/complex/worst": tm_scores.min(),
+            "tm_score/complex/mean": tm_scores.mean(),
+            "tm_score/complex/median": tm_scores.sort(descending=True)[0][median_index],
+            "tm_score/complex/random": tm_scores[0],
+        }
+
+        return aggregated
