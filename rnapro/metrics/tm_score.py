@@ -41,14 +41,23 @@ def write_target_line(atom_name, atom_serial, residue_name, chain_id, residue_nu
 def write2pdb(df: pd.DataFrame, xyz_id: int, target_path: str) -> int:
     """
     Write single-chain PDB (chain 'A') using row['resid'] as residue_num.
+    Returns 0 if the required coordinate columns don't exist.
     Raises exceptions on invalid data.
     """
+    # Check if required columns exist (handles case where we have fewer models than expected)
+    x_col = f'x_{xyz_id}'
+    y_col = f'y_{xyz_id}'
+    z_col = f'z_{xyz_id}'
+
+    if x_col not in df.columns or y_col not in df.columns or z_col not in df.columns:
+        return 0
+
     resolved_cnt = 0
     with open(target_path, 'w') as fh:
         for _, row in df.iterrows():
-            x = row[f'x_{xyz_id}']
-            y = row[f'y_{xyz_id}']
-            z = row[f'z_{xyz_id}']
+            x = row[x_col]
+            y = row[y_col]
+            z = row[z_col]
             if x > -1e6 and y > -1e6 and z > -1e6:
                 resolved_cnt += 1
                 resid_num = int(row['resid'])
@@ -350,8 +359,15 @@ def score(
         if not native_with_coords:
             raise ValueError(f"No native models with coordinates for target {target_id}")
 
+        # Detect number of prediction models from columns (x_1, x_2, ..., x_N)
+        pred_counts = [int(col.split('_')[1]) for col in group_predicted.columns if col.startswith('x_')]
+        max_pred_cnt = max(pred_counts) if pred_counts else 0
+
+        if max_pred_cnt == 0:
+            raise ValueError(f"No prediction models found for target {target_id}")
+
         best_per_pred = []
-        for pred_cnt in range(1, 6):
+        for pred_cnt in range(1, max_pred_cnt + 1):
             if not is_multicopy:
                 predicted_pdb = f'predicted_{target_id}_{pred_cnt}.pdb'
                 resolved_pred = write2pdb(group_predicted, pred_cnt, predicted_pdb)
@@ -538,13 +554,18 @@ class TMScoreMetrics(nn.Module):
         N_sample = pred_coords.shape[0]
         N_atom = pred_coords.shape[1]
 
+        # Create DataFrames in Kaggle competition format
+        # ID format: "target_{resid}" where target is the target_id
+        # The score function will extract target_id by removing last part after underscore
+        target_id = "target"  # Simple target_id for training
+
         # Create solution DataFrame (ground truth)
         # Ground truth has only 1 sample, so we create columns x_1, y_1, z_1
         solution_rows = []
         for atom_idx in range(N_atom):
             row = {
-                'ID': f'target_{atom_idx}',
-                'resid': atom_idx,
+                'ID': f'{target_id}_{atom_idx + 1}',  # 1-indexed like Kaggle
+                'resid': atom_idx + 1,  # 1-indexed
                 'resname': 'A',
                 'x_1': label_coords[atom_idx, 0],
                 'y_1': label_coords[atom_idx, 1],
@@ -557,8 +578,8 @@ class TMScoreMetrics(nn.Module):
         submission_rows = []
         for atom_idx in range(N_atom):
             row = {
-                'ID': f'target_{atom_idx}',
-                'resid': atom_idx,
+                'ID': f'{target_id}_{atom_idx + 1}',  # 1-indexed like Kaggle
+                'resid': atom_idx + 1,  # 1-indexed
                 'resname': 'A',
             }
             for sample_idx in range(N_sample):
