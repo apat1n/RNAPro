@@ -504,49 +504,56 @@ class TMScoreMetrics(nn.Module):
     def compute_tm_score(self, pred_dict: Dict, label_dict: Dict) -> Dict[str, torch.Tensor]:
         """Compute TM-score between predicted and ground truth structures.
 
+        This method formats the coordinates into the Kaggle competition format where:
+        - Each row represents one atom/residue
+        - Multiple samples are stored as separate column sets (x_1/y_1/z_1, x_2/y_2/z_2, etc.)
+        - The score function compares all predictions against all ground truths
+
+        Typical usage in training: 1 ground truth sample vs N predicted samples
+
         Args:
             pred_dict: Dictionary containing:
                 - coordinate: [N_sample, N_atom, 3] predicted coordinates
-                - additional metadata
             label_dict: Dictionary containing:
-                - coordinate: [N_sample, N_atom, 3] ground truth coordinates
-                - additional metadata
+                - coordinate: [N_atom, 3] ground truth coordinates (single structure)
 
         Returns:
             Dictionary with 'tm_scores': [N_sample] tensor of TM-scores
         """
-        # Convert tensors to numpy and prepare DataFrames for score function
-        pred_coords = pred_dict["coordinate"].detach().cpu().numpy()
-        label_coords = label_dict["coordinate"].detach().cpu().numpy()
+        # Convert tensors to numpy
+        pred_coords = pred_dict["coordinate"].detach().cpu().numpy()  # [N_sample, N_atom, 3]
+        label_coords = label_dict["coordinate"].detach().cpu().numpy()  # [N_atom, 3]
 
-        # Handle both [N_atom, 3] and [N_sample, N_atom, 3] shapes
-        if pred_coords.ndim == 2:
-            # Shape is [N_atom, 3], add sample dimension
-            pred_coords = pred_coords[None, :, :]  # [1, N_atom, 3]
-        if label_coords.ndim == 2:
-            # Shape is [N_atom, 3], add sample dimension
-            label_coords = label_coords[None, :, :]  # [1, N_atom, 3]
+        if pred_coords.ndim != 3:
+            raise ValueError(
+                f"Expected pred_dict['coordinate'] to be 3D [N_sample, N_atom, 3], "
+                f"got shape {pred_coords.shape}"
+            )
+        if label_coords.ndim != 2:
+            raise ValueError(
+                f"Expected label_dict['coordinate'] to be 2D [N_atom, 3], "
+                f"got shape {label_coords.shape}"
+            )
 
         N_sample = pred_coords.shape[0]
         N_atom = pred_coords.shape[1]
 
         # Create solution DataFrame (ground truth)
-        # Each row represents one atom/residue with coordinates for all samples
+        # Ground truth has only 1 sample, so we create columns x_1, y_1, z_1
         solution_rows = []
         for atom_idx in range(N_atom):
             row = {
                 'ID': f'target_{atom_idx}',
                 'resid': atom_idx,
-                'resname': 'A',  # Default residue name
+                'resname': 'A',
+                'x_1': label_coords[atom_idx, 0],
+                'y_1': label_coords[atom_idx, 1],
+                'z_1': label_coords[atom_idx, 2],
             }
-            for sample_idx in range(N_sample):
-                row[f'x_{sample_idx + 1}'] = label_coords[sample_idx, atom_idx, 0]
-                row[f'y_{sample_idx + 1}'] = label_coords[sample_idx, atom_idx, 1]
-                row[f'z_{sample_idx + 1}'] = label_coords[sample_idx, atom_idx, 2]
             solution_rows.append(row)
 
         # Create submission DataFrame (predictions)
-        # Each row represents one atom/residue with coordinates for all samples
+        # Each row represents one atom/residue with coordinates for all N_sample predictions
         submission_rows = []
         for atom_idx in range(N_atom):
             row = {
@@ -564,9 +571,11 @@ class TMScoreMetrics(nn.Module):
         submission_df = pd.DataFrame(submission_rows)
 
         # Compute TM-score using the score function
+        # The score function compares all predictions against the ground truth
+        # and returns an aggregated score
         try:
             tm_score_value = score(solution_df, submission_df, usalign_bin_hint=self.usalign_bin)
-            # Return as tensor for each sample (all samples get the same aggregated score for now)
+            # Return as tensor for each predicted sample (all get the same aggregated score)
             tm_scores = torch.tensor([tm_score_value] * N_sample, dtype=torch.float32)
         except Exception as e:
             print(f"Warning: TM-score computation failed: {e}")
